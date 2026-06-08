@@ -1,0 +1,26 @@
+# Go
+bin/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Docker / local data
+postgres-data/
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
