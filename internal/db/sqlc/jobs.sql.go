@@ -11,6 +11,38 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const cancelPendingJob = `-- name: CancelPendingJob :one
+UPDATE jobs
+SET status = 'cancelled',
+    updated_at = NOW()
+WHERE id = $1
+  AND status = 'pending'
+RETURNING id, kind, payload, status, priority, run_at, created_at, updated_at, attempted_at, completed_at, retry_count, max_retries, error_message, locked_by, locked_until
+`
+
+func (q *Queries) CancelPendingJob(ctx context.Context, id pgtype.UUID) (Job, error) {
+	row := q.db.QueryRow(ctx, cancelPendingJob, id)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Payload,
+		&i.Status,
+		&i.Priority,
+		&i.RunAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AttemptedAt,
+		&i.CompletedAt,
+		&i.RetryCount,
+		&i.MaxRetries,
+		&i.ErrorMessage,
+		&i.LockedBy,
+		&i.LockedUntil,
+	)
+	return i, err
+}
+
 const createJob = `-- name: CreateJob :one
 INSERT INTO jobs (
     kind,
@@ -94,18 +126,12 @@ func (q *Queries) GetJobByID(ctx context.Context, id pgtype.UUID) (Job, error) {
 const listJobs = `-- name: ListJobs :many
 SELECT id, kind, payload, status, priority, run_at, created_at, updated_at, attempted_at, completed_at, retry_count, max_retries, error_message, locked_by, locked_until
 FROM jobs
-WHERE ($1::job_status IS NULL OR status = $1)
 ORDER BY created_at DESC
-LIMIT $2
+LIMIT $1
 `
 
-type ListJobsParams struct {
-	Column1 JobStatus
-	Limit   int32
-}
-
-func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]Job, error) {
-	rows, err := q.db.Query(ctx, listJobs, arg.Column1, arg.Limit)
+func (q *Queries) ListJobs(ctx context.Context, jobLimit int32) ([]Job, error) {
+	rows, err := q.db.Query(ctx, listJobs, jobLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -138,4 +164,64 @@ func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]Job, erro
 		return nil, err
 	}
 	return items, nil
+}
+
+const listJobsByStatus = `-- name: ListJobsByStatus :many
+SELECT id, kind, payload, status, priority, run_at, created_at, updated_at, attempted_at, completed_at, retry_count, max_retries, error_message, locked_by, locked_until
+FROM jobs
+WHERE status = $1
+ORDER BY created_at DESC
+LIMIT $2
+`
+
+type ListJobsByStatusParams struct {
+	Status   JobStatus
+	JobLimit int32
+}
+
+func (q *Queries) ListJobsByStatus(ctx context.Context, arg ListJobsByStatusParams) ([]Job, error) {
+	rows, err := q.db.Query(ctx, listJobsByStatus, arg.Status, arg.JobLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.Payload,
+			&i.Status,
+			&i.Priority,
+			&i.RunAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.AttemptedAt,
+			&i.CompletedAt,
+			&i.RetryCount,
+			&i.MaxRetries,
+			&i.ErrorMessage,
+			&i.LockedBy,
+			&i.LockedUntil,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ping = `-- name: Ping :one
+SELECT 1
+`
+
+func (q *Queries) Ping(ctx context.Context) (int32, error) {
+	row := q.db.QueryRow(ctx, ping)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
 }

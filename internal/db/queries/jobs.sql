@@ -16,11 +16,28 @@ RETURNING *;
 -- name: GetJobByID :one
 SELECT *
 FROM jobs
-WHERE id = $1;
+WHERE id = sqlc.arg(id);
 
 -- name: ListJobs :many
 SELECT *
 FROM jobs
-WHERE ($1::job_status IS NULL OR status = $1)
 ORDER BY created_at DESC
-LIMIT $2;
+LIMIT sqlc.arg(job_limit);
+
+-- name: ListJobsByStatus :many
+SELECT *
+FROM jobs
+WHERE status = sqlc.arg(status)
+ORDER BY created_at DESC
+LIMIT sqlc.arg(job_limit);
+
+-- name: CancelPendingJob :one
+UPDATE jobs
+SET status = 'cancelled',
+    updated_at = NOW()
+WHERE id = sqlc.arg(id)
+  AND status = 'pending'
+RETURNING *;
+
+-- name: Ping :one
+SELECT 1;
