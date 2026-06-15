@@ -10,8 +10,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/sgavriil01/forgequeue/internal/config"
+	db "github.com/sgavriil01/forgequeue/internal/db/sqlc"
 	"github.com/sgavriil01/forgequeue/internal/httpapi"
+	"github.com/sgavriil01/forgequeue/internal/jobs"
 )
 
 func main() {
@@ -34,9 +38,20 @@ func run(ctx context.Context, getenv func(string) string) error {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("create database pool: %w", err)
+	}
+	defer pool.Close()
+
+	queries := db.New(pool)
+	jobService := jobs.NewService(queries)
+
+	apiServer := httpapi.NewServer(jobService, logger)
+
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: httpapi.NewServer(logger),
+		Handler: apiServer.Routes(),
 	}
 
 	errCh := make(chan error, 1)

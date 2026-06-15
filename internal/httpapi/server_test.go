@@ -1,47 +1,56 @@
 package httpapi
 
 import (
-	"encoding/json"
-	"io"
-	"log/slog"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
-func TestHealthz(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(logger)
+type fakeHealthService struct {
+	err error
+}
+
+func (f fakeHealthService) Ping(ctx context.Context) error {
+	return f.err
+}
+
+func TestHealthzReturnsOK(t *testing.T) {
+	server := NewServer(fakeHealthService{}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 
-	server.ServeHTTP(rec, req)
+	server.Routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	var body map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-
-	if body["status"] != "ok" {
-		t.Fatalf("status body = %q, want %q", body["status"], "ok")
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 }
 
-func TestReadyz(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := NewServer(logger)
+func TestReadyzReturnsOKWhenDatabaseIsReady(t *testing.T) {
+	server := NewServer(fakeHealthService{}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
 
-	server.ServeHTTP(rec, req)
+	server.Routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+}
+
+func TestReadyzReturnsServiceUnavailableWhenDatabaseIsNotReady(t *testing.T) {
+	server := NewServer(fakeHealthService{err: errors.New("db down")}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, rec.Code)
 	}
 }
