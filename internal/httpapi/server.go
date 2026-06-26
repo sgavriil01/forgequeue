@@ -17,6 +17,8 @@ type JobService interface {
 	Ping(ctx context.Context) error
 	CreateJob(ctx context.Context, input jobs.CreateJobInput) (db.Job, error)
 	GetJob(ctx context.Context, id pgtype.UUID) (db.Job, error)
+	ListJobs(ctx context.Context, status *db.JobStatus,  limit int32) ([]db.Job, error)
+	CancelJob(ctx context.Context, id pgtype.UUID) (db.Job, error)
 }
 
 type Server struct {
@@ -45,6 +47,8 @@ func (s *Server) Routes() http.Handler {
 
 	r.Post("/jobs", s.handleCreateJob)
 	r.Get("/jobs/{id}", s.handleGetJob)
+	r.Get("/jobs", s.handleListJobs)
+	r.Post("/jobs/{id}/cancel", s.handleCancelJob)
 
 	return r
 }

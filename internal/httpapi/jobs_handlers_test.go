@@ -20,6 +20,12 @@ type fakeEndpointJobService struct {
 
 	getJob db.Job
 	getErr error
+
+	listJobs []db.Job
+	listErr  error
+
+	cancelJob db.Job
+	cancelErr error
 }
 
 func (f fakeEndpointJobService) Ping(ctx context.Context) error {
@@ -40,6 +46,22 @@ func (f fakeEndpointJobService) GetJob(ctx context.Context, id pgtype.UUID) (db.
 	}
 
 	return f.getJob, nil
+}
+
+func (f fakeEndpointJobService) ListJobs(ctx context.Context, status *db.JobStatus, limit int32) ([]db.Job, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+
+	return f.listJobs, nil
+}
+
+func (f fakeEndpointJobService) CancelJob(ctx context.Context, id pgtype.UUID) (db.Job, error) {
+	if f.cancelErr != nil {
+		return db.Job{}, f.cancelErr
+	}
+
+	return f.cancelJob, nil
 }
 
 func TestCreateJobReturnsCreated(t *testing.T) {
@@ -159,6 +181,144 @@ func TestGetJobReturnsInternalError(t *testing.T) {
 	}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/jobs/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d", http.StatusInternalServerError, rec.Code)
+	}
+}
+
+func TestListJobsReturnsOK(t *testing.T) {
+	id, err := parseUUID("11111111-1111-1111-1111-111111111111")
+	if err != nil {
+		t.Fatalf("parse uuid: %v", err)
+	}
+
+	server := NewServer(fakeEndpointJobService{
+		listJobs: []db.Job{
+			{
+				ID:         id,
+				Kind:       "test_job",
+				Status:     db.JobStatusPending,
+				Payload:    []byte(`{}`),
+				MaxRetries: 3,
+			},
+		},
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs?status=pending&limit=10", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+}
+
+func TestListJobsReturnsBadRequestForInvalidStatus(t *testing.T) {
+	server := NewServer(fakeEndpointJobService{}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs?status=unknown", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+}
+
+func TestListJobsReturnsBadRequestForInvalidLimit(t *testing.T) {
+	server := NewServer(fakeEndpointJobService{}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs?limit=abc", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+}
+
+func TestListJobsReturnsInternalError(t *testing.T) {
+	server := NewServer(fakeEndpointJobService{
+		listErr: errors.New("db exploded"),
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d", http.StatusInternalServerError, rec.Code)
+	}
+}
+
+func TestCancelJobReturnsOK(t *testing.T) {
+	id, err := parseUUID("11111111-1111-1111-1111-111111111111")
+	if err != nil {
+		t.Fatalf("parse uuid: %v", err)
+	}
+
+	server := NewServer(fakeEndpointJobService{
+		cancelJob: db.Job{
+			ID:         id,
+			Kind:       "test_job",
+			Status:     db.JobStatusCancelled,
+			Payload:    []byte(`{}`),
+			MaxRetries: 3,
+		},
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/11111111-1111-1111-1111-111111111111/cancel", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+}
+
+func TestCancelJobReturnsBadRequestForInvalidUUID(t *testing.T) {
+	server := NewServer(fakeEndpointJobService{}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/not-a-uuid/cancel", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+}
+
+func TestCancelJobReturnsConflictWhenNotCancelable(t *testing.T) {
+	server := NewServer(fakeEndpointJobService{
+		cancelErr: jobs.ErrJobNotCancelable,
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/11111111-1111-1111-1111-111111111111/cancel", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d", http.StatusConflict, rec.Code)
+	}
+}
+
+func TestCancelJobReturnsInternalError(t *testing.T) {
+	server := NewServer(fakeEndpointJobService{
+		cancelErr: errors.New("db exploded"),
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/11111111-1111-1111-1111-111111111111/cancel", nil)
 	rec := httptest.NewRecorder()
 
 	server.Routes().ServeHTTP(rec, req)

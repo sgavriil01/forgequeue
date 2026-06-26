@@ -48,6 +48,16 @@ func toJobResponse(job db.Job) jobResponse {
 	}
 }
 
+func toJobResponses(jobs []db.Job) []jobResponse {
+	responses := make([]jobResponse, 0, len(jobs))
+
+	for _, job := range jobs {
+		responses = append(responses, toJobResponse(job))
+	}
+
+	return responses
+}
+
 func parseUUID(raw string) (pgtype.UUID, error) {
 	parsed, err := uuid.Parse(raw)
 	if err != nil {
