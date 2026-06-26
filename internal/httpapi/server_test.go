@@ -29,6 +29,14 @@ func (f fakeJobService) GetJob(ctx context.Context, id pgtype.UUID) (db.Job, err
 	return db.Job{}, nil
 }
 
+func (f fakeJobService) ListJobs(ctx context.Context, status *db.JobStatus, limit int32) ([]db.Job, error) {
+	return []db.Job{}, nil
+}
+
+func (f fakeJobService) CancelJob(ctx context.Context, id pgtype.UUID) (db.Job, error) {
+	return db.Job{}, nil
+}
+
 func TestHealthzReturnsOK(t *testing.T) {
 	server := NewServer(fakeJobService{}, nil)
 
