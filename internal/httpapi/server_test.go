@@ -6,18 +6,31 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgtype"
+
+	db "github.com/sgavriil01/forgequeue/internal/db/sqlc"
+	"github.com/sgavriil01/forgequeue/internal/jobs"
 )
 
-type fakeHealthService struct {
-	err error
+type fakeJobService struct {
+	pingErr error
 }
 
-func (f fakeHealthService) Ping(ctx context.Context) error {
-	return f.err
+func (f fakeJobService) Ping(ctx context.Context) error {
+	return f.pingErr
+}
+
+func (f fakeJobService) CreateJob(ctx context.Context, input jobs.CreateJobInput) (db.Job, error) {
+	return db.Job{}, nil
+}
+
+func (f fakeJobService) GetJob(ctx context.Context, id pgtype.UUID) (db.Job, error) {
+	return db.Job{}, nil
 }
 
 func TestHealthzReturnsOK(t *testing.T) {
-	server := NewServer(fakeHealthService{}, nil)
+	server := NewServer(fakeJobService{}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -30,7 +43,7 @@ func TestHealthzReturnsOK(t *testing.T) {
 }
 
 func TestReadyzReturnsOKWhenDatabaseIsReady(t *testing.T) {
-	server := NewServer(fakeHealthService{}, nil)
+	server := NewServer(fakeJobService{}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
@@ -43,7 +56,7 @@ func TestReadyzReturnsOKWhenDatabaseIsReady(t *testing.T) {
 }
 
 func TestReadyzReturnsServiceUnavailableWhenDatabaseIsNotReady(t *testing.T) {
-	server := NewServer(fakeHealthService{err: errors.New("db down")}, nil)
+	server := NewServer(fakeJobService{pingErr: errors.New("db down")}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()

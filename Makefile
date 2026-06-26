@@ -36,3 +36,6 @@ migrate-force:
 
 sqlc:
 	sqlc generate
+	
+run-api-local:
+	FORGEQUEUE_DATABASE_URL="postgres://forgequeue:forgequeue@localhost:5433/forgequeue?sslmode=disable" go run ./cmd/api
