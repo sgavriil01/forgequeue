@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sgavriil01/forgequeue/internal/config"
+	db "github.com/sgavriil01/forgequeue/internal/db/sqlc"
+	"github.com/sgavriil01/forgequeue/internal/worker"
 )
 
 func main() {
@@ -31,14 +37,62 @@ func run(ctx context.Context, getenv func(string) string) error {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	logger.Info(
-		"worker starting",
-		"env", cfg.Env,
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("create database pool: %w", err)
+	}
+	defer pool.Close()
+
+	queries := db.New(pool)
+
+	registry, err := worker.NewRegistry(
+		worker.NewHandlerFunc("test_job", func(ctx context.Context, job db.Job) error {
+			logger.Info(
+				"handling test job",
+				"job_id", job.ID,
+				"payload", string(job.Payload),
+			)
+
+			// Simulate a tiny bit of work so you can observe the worker.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+				return nil
+			}
+		}),
 	)
+	if err != nil {
+		return fmt.Errorf("create worker registry: %w", err)
+	}
+
+	workerPool := worker.NewExecutorPool(
+		queries,
+		registry,
+		worker.PoolConfig{
+			NumWorkers:   5,
+			PollInterval: 1 * time.Second,
+			IdleJitter:   250 * time.Millisecond,
+			LeaseSeconds: 30,
+		},
+		logger,
+	)
+
+	workerPool.Start(ctx)
+
+	logger.Info("worker process started")
 
 	<-ctx.Done()
 
-	logger.Info("worker stopped")
+	logger.Info("shutdown signal received")
+
+	workerPool.Stop()
+
+	logger.Info("worker process stopped")
+
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
 
 	return nil
 }
