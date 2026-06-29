@@ -43,6 +43,55 @@ func (q *Queries) CancelPendingJob(ctx context.Context, id pgtype.UUID) (Job, er
 	return i, err
 }
 
+const claimNextJob = `-- name: ClaimNextJob :one
+WITH claimed AS (
+    SELECT id
+    FROM jobs
+    WHERE status = 'pending'
+      AND run_at <= clock_timestamp()
+    ORDER BY priority DESC, run_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs
+SET status = 'running',
+    locked_by = $1::text,
+    locked_until = clock_timestamp() + ($2::int * INTERVAL '1 second'),
+    attempted_at = clock_timestamp(),
+    updated_at = clock_timestamp()
+FROM claimed
+WHERE jobs.id = claimed.id
+RETURNING jobs.id, jobs.kind, jobs.payload, jobs.status, jobs.priority, jobs.run_at, jobs.created_at, jobs.updated_at, jobs.attempted_at, jobs.completed_at, jobs.retry_count, jobs.max_retries, jobs.error_message, jobs.locked_by, jobs.locked_until
+`
+
+type ClaimNextJobParams struct {
+	WorkerID     string
+	LeaseSeconds int32
+}
+
+func (q *Queries) ClaimNextJob(ctx context.Context, arg ClaimNextJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, claimNextJob, arg.WorkerID, arg.LeaseSeconds)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Payload,
+		&i.Status,
+		&i.Priority,
+		&i.RunAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AttemptedAt,
+		&i.CompletedAt,
+		&i.RetryCount,
+		&i.MaxRetries,
+		&i.ErrorMessage,
+		&i.LockedBy,
+		&i.LockedUntil,
+	)
+	return i, err
+}
+
 const createJob = `-- name: CreateJob :one
 INSERT INTO jobs (
     kind,
@@ -213,6 +262,89 @@ func (q *Queries) ListJobsByStatus(ctx context.Context, arg ListJobsByStatusPara
 		return nil, err
 	}
 	return items, nil
+}
+
+const markJobCompleted = `-- name: MarkJobCompleted :one
+UPDATE jobs
+SET status = 'completed',
+    completed_at = clock_timestamp(),
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+WHERE id = $1
+  AND locked_by = $2::text
+  AND status = 'running'
+RETURNING id, kind, payload, status, priority, run_at, created_at, updated_at, attempted_at, completed_at, retry_count, max_retries, error_message, locked_by, locked_until
+`
+
+type MarkJobCompletedParams struct {
+	ID       pgtype.UUID
+	WorkerID string
+}
+
+func (q *Queries) MarkJobCompleted(ctx context.Context, arg MarkJobCompletedParams) (Job, error) {
+	row := q.db.QueryRow(ctx, markJobCompleted, arg.ID, arg.WorkerID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Payload,
+		&i.Status,
+		&i.Priority,
+		&i.RunAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AttemptedAt,
+		&i.CompletedAt,
+		&i.RetryCount,
+		&i.MaxRetries,
+		&i.ErrorMessage,
+		&i.LockedBy,
+		&i.LockedUntil,
+	)
+	return i, err
+}
+
+const markJobFailed = `-- name: MarkJobFailed :one
+UPDATE jobs
+SET status = 'failed',
+    error_message = $1::text,
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+WHERE id = $2
+  AND locked_by = $3::text
+  AND status = 'running'
+RETURNING id, kind, payload, status, priority, run_at, created_at, updated_at, attempted_at, completed_at, retry_count, max_retries, error_message, locked_by, locked_until
+`
+
+type MarkJobFailedParams struct {
+	ErrorMessage string
+	ID           pgtype.UUID
+	WorkerID     string
+}
+
+func (q *Queries) MarkJobFailed(ctx context.Context, arg MarkJobFailedParams) (Job, error) {
+	row := q.db.QueryRow(ctx, markJobFailed, arg.ErrorMessage, arg.ID, arg.WorkerID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Payload,
+		&i.Status,
+		&i.Priority,
+		&i.RunAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AttemptedAt,
+		&i.CompletedAt,
+		&i.RetryCount,
+		&i.MaxRetries,
+		&i.ErrorMessage,
+		&i.LockedBy,
+		&i.LockedUntil,
+	)
+	return i, err
 }
 
 const ping = `-- name: Ping :one

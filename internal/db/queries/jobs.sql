@@ -39,5 +39,49 @@ WHERE id = sqlc.arg(id)
   AND status = 'pending'
 RETURNING *;
 
+-- name: ClaimNextJob :one
+WITH claimed AS (
+    SELECT id
+    FROM jobs
+    WHERE status = 'pending'
+      AND run_at <= clock_timestamp()
+    ORDER BY priority DESC, run_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs
+SET status = 'running',
+    locked_by = sqlc.arg(worker_id)::text,
+    locked_until = clock_timestamp() + (sqlc.arg(lease_seconds)::int * INTERVAL '1 second'),
+    attempted_at = clock_timestamp(),
+    updated_at = clock_timestamp()
+FROM claimed
+WHERE jobs.id = claimed.id
+RETURNING jobs.*;
+
+-- name: MarkJobCompleted :one
+UPDATE jobs
+SET status = 'completed',
+    completed_at = clock_timestamp(),
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+WHERE id = sqlc.arg(id)
+  AND locked_by = sqlc.arg(worker_id)::text
+  AND status = 'running'
+RETURNING *;
+
+-- name: MarkJobFailed :one
+UPDATE jobs
+SET status = 'failed',
+    error_message = sqlc.arg(error_message)::text,
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+WHERE id = sqlc.arg(id)
+  AND locked_by = sqlc.arg(worker_id)::text
+  AND status = 'running'
+RETURNING *;
+
 -- name: Ping :one
 SELECT 1;
