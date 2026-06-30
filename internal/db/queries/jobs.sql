@@ -83,5 +83,32 @@ WHERE id = sqlc.arg(id)
   AND status = 'running'
 RETURNING *;
 
+-- name: ScheduleJobRetry :one
+UPDATE jobs
+SET status = 'pending',
+    retry_count = retry_count + 1,
+    error_message = sqlc.arg(error_message)::text,
+    run_at = clock_timestamp() + (sqlc.arg(delay_seconds)::int * INTERVAL '1 second'),
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+WHERE id = sqlc.arg(id)
+  AND locked_by = sqlc.arg(worker_id)::text
+  AND status = 'running'
+RETURNING *;
+
+-- name: MarkJobDead :one
+UPDATE jobs
+SET status = 'dead',
+    retry_count = retry_count + 1,
+    error_message = sqlc.arg(error_message)::text,
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+WHERE id = sqlc.arg(id)
+  AND locked_by = sqlc.arg(worker_id)::text
+  AND status = 'running'
+RETURNING *;
+
 -- name: Ping :one
 SELECT 1;

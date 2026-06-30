@@ -19,9 +19,13 @@ type fakeStore struct {
 	completedParams db.MarkJobCompletedParams
 	completedErr    error
 
-	failedCalled bool
-	failedParams db.MarkJobFailedParams
-	failedErr    error
+	retryCalled bool
+	retryParams db.ScheduleJobRetryParams
+	retryErr    error
+
+	deadCalled bool
+	deadParams db.MarkJobDeadParams
+	deadErr    error
 }
 
 func (f *fakeStore) ClaimNextJob(ctx context.Context, arg db.ClaimNextJobParams) (db.Job, error) {
@@ -43,15 +47,36 @@ func (f *fakeStore) MarkJobCompleted(ctx context.Context, arg db.MarkJobComplete
 	return db.Job{ID: arg.ID, Status: db.JobStatusCompleted}, nil
 }
 
-func (f *fakeStore) MarkJobFailed(ctx context.Context, arg db.MarkJobFailedParams) (db.Job, error) {
-	f.failedCalled = true
-	f.failedParams = arg
+func (f *fakeStore) ScheduleJobRetry(ctx context.Context, arg db.ScheduleJobRetryParams) (db.Job, error) {
+	f.retryCalled = true
+	f.retryParams = arg
 
-	if f.failedErr != nil {
-		return db.Job{}, f.failedErr
+	if f.retryErr != nil {
+		return db.Job{}, f.retryErr
 	}
 
-	return db.Job{ID: arg.ID, Status: db.JobStatusFailed}, nil
+	return db.Job{
+		ID:         arg.ID,
+		Status:     db.JobStatusPending,
+		RetryCount: f.claimJob.RetryCount + 1,
+		MaxRetries: f.claimJob.MaxRetries,
+	}, nil
+}
+
+func (f *fakeStore) MarkJobDead(ctx context.Context, arg db.MarkJobDeadParams) (db.Job, error) {
+	f.deadCalled = true
+	f.deadParams = arg
+
+	if f.deadErr != nil {
+		return db.Job{}, f.deadErr
+	}
+
+	return db.Job{
+		ID:         arg.ID,
+		Status:     db.JobStatusDead,
+		RetryCount: f.claimJob.RetryCount + 1,
+		MaxRetries: f.claimJob.MaxRetries,
+	}, nil
 }
 
 func testUUID() pgtype.UUID {
@@ -86,8 +111,12 @@ func TestExecuteOnceReturnsFalseWhenNoJobAvailable(t *testing.T) {
 		t.Fatalf("did not expect completed to be called")
 	}
 
-	if store.failedCalled {
-		t.Fatalf("did not expect failed to be called")
+	if store.retryCalled {
+		t.Fatalf("did not expect retry to be called")
+	}
+
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
 	}
 }
 
@@ -96,9 +125,11 @@ func TestExecuteOnceMarksJobCompletedWhenHandlerSucceeds(t *testing.T) {
 
 	store := &fakeStore{
 		claimJob: db.Job{
-			ID:     jobID,
-			Kind:   "test_job",
-			Status: db.JobStatusRunning,
+			ID:         jobID,
+			Kind:       "test_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 0,
+			MaxRetries: 3,
 		},
 	}
 
@@ -126,8 +157,12 @@ func TestExecuteOnceMarksJobCompletedWhenHandlerSucceeds(t *testing.T) {
 		t.Fatalf("expected completed to be called")
 	}
 
-	if store.failedCalled {
-		t.Fatalf("did not expect failed to be called")
+	if store.retryCalled {
+		t.Fatalf("did not expect retry to be called")
+	}
+
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
 	}
 
 	if store.completedParams.ID != jobID {
@@ -139,14 +174,16 @@ func TestExecuteOnceMarksJobCompletedWhenHandlerSucceeds(t *testing.T) {
 	}
 }
 
-func TestExecuteOnceMarksJobFailedWhenHandlerReturnsError(t *testing.T) {
+func TestExecuteOnceSchedulesRetryWhenHandlerReturnsErrorAndRetriesRemain(t *testing.T) {
 	jobID := testUUID()
 
 	store := &fakeStore{
 		claimJob: db.Job{
-			ID:     jobID,
-			Kind:   "test_job",
-			Status: db.JobStatusRunning,
+			ID:         jobID,
+			Kind:       "test_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 0,
+			MaxRetries: 3,
 		},
 	}
 
@@ -174,23 +211,99 @@ func TestExecuteOnceMarksJobFailedWhenHandlerReturnsError(t *testing.T) {
 		t.Fatalf("did not expect completed to be called")
 	}
 
-	if !store.failedCalled {
-		t.Fatalf("expected failed to be called")
+	if !store.retryCalled {
+		t.Fatalf("expected retry to be called")
 	}
 
-	if store.failedParams.ErrorMessage != "handler failed" {
-		t.Fatalf("expected handler failed, got %s", store.failedParams.ErrorMessage)
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
+	}
+
+	if store.retryParams.ID != jobID {
+		t.Fatalf("expected retry id %v, got %v", jobID, store.retryParams.ID)
+	}
+
+	if store.retryParams.WorkerID != "worker-1" {
+		t.Fatalf("expected worker-1, got %s", store.retryParams.WorkerID)
+	}
+
+	if store.retryParams.ErrorMessage != "handler failed" {
+		t.Fatalf("expected handler failed, got %s", store.retryParams.ErrorMessage)
+	}
+
+	if store.retryParams.DelaySeconds != 1 {
+		t.Fatalf("expected delay 1, got %d", store.retryParams.DelaySeconds)
 	}
 }
 
-func TestExecuteOnceMarksJobFailedWhenHandlerMissing(t *testing.T) {
+func TestExecuteOnceMarksJobDeadWhenHandlerReturnsErrorAndRetriesExhausted(t *testing.T) {
 	jobID := testUUID()
 
 	store := &fakeStore{
 		claimJob: db.Job{
-			ID:     jobID,
-			Kind:   "unknown_job",
-			Status: db.JobStatusRunning,
+			ID:         jobID,
+			Kind:       "test_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 2,
+			MaxRetries: 3,
+		},
+	}
+
+	handler := NewHandlerFunc("test_job", func(ctx context.Context, job db.Job) error {
+		return errors.New("handler failed")
+	})
+
+	registry, err := NewRegistry(handler)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	executor := NewExecutor(store, registry, "worker-1", 30, nil)
+
+	processed, err := executor.ExecuteOnce(context.Background())
+	if err != nil {
+		t.Fatalf("execute once: %v", err)
+	}
+
+	if !processed {
+		t.Fatalf("expected processed=true")
+	}
+
+	if store.completedCalled {
+		t.Fatalf("did not expect completed to be called")
+	}
+
+	if store.retryCalled {
+		t.Fatalf("did not expect retry to be called")
+	}
+
+	if !store.deadCalled {
+		t.Fatalf("expected dead to be called")
+	}
+
+	if store.deadParams.ID != jobID {
+		t.Fatalf("expected dead id %v, got %v", jobID, store.deadParams.ID)
+	}
+
+	if store.deadParams.WorkerID != "worker-1" {
+		t.Fatalf("expected worker-1, got %s", store.deadParams.WorkerID)
+	}
+
+	if store.deadParams.ErrorMessage != "handler failed" {
+		t.Fatalf("expected handler failed, got %s", store.deadParams.ErrorMessage)
+	}
+}
+
+func TestExecuteOnceSchedulesRetryWhenHandlerMissing(t *testing.T) {
+	jobID := testUUID()
+
+	store := &fakeStore{
+		claimJob: db.Job{
+			ID:         jobID,
+			Kind:       "unknown_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 0,
+			MaxRetries: 3,
 		},
 	}
 
@@ -214,19 +327,30 @@ func TestExecuteOnceMarksJobFailedWhenHandlerMissing(t *testing.T) {
 		t.Fatalf("did not expect completed to be called")
 	}
 
-	if !store.failedCalled {
-		t.Fatalf("expected failed to be called")
+	if !store.retryCalled {
+		t.Fatalf("expected retry to be called")
+	}
+
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
+	}
+
+	expected := "no handler registered for job kind: unknown_job"
+	if store.retryParams.ErrorMessage != expected {
+		t.Fatalf("expected %q, got %q", expected, store.retryParams.ErrorMessage)
 	}
 }
 
-func TestExecuteOnceMarksJobFailedWhenHandlerPanics(t *testing.T) {
+func TestExecuteOnceSchedulesRetryWhenHandlerPanics(t *testing.T) {
 	jobID := testUUID()
 
 	store := &fakeStore{
 		claimJob: db.Job{
-			ID:     jobID,
-			Kind:   "test_job",
-			Status: db.JobStatusRunning,
+			ID:         jobID,
+			Kind:       "test_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 0,
+			MaxRetries: 3,
 		},
 	}
 
@@ -254,7 +378,54 @@ func TestExecuteOnceMarksJobFailedWhenHandlerPanics(t *testing.T) {
 		t.Fatalf("did not expect completed to be called")
 	}
 
-	if !store.failedCalled {
-		t.Fatalf("expected failed to be called")
+	if !store.retryCalled {
+		t.Fatalf("expected retry to be called")
+	}
+
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
+	}
+
+	expected := "handler panic: boom"
+	if store.retryParams.ErrorMessage != expected {
+		t.Fatalf("expected %q, got %q", expected, store.retryParams.ErrorMessage)
+	}
+}
+
+func TestRetryDelaySeconds(t *testing.T) {
+	tests := []struct {
+		name              string
+		currentRetryCount int32
+		expected          int32
+	}{
+		{
+			name:              "first retry",
+			currentRetryCount: 0,
+			expected:          1,
+		},
+		{
+			name:              "second retry",
+			currentRetryCount: 1,
+			expected:          2,
+		},
+		{
+			name:              "third retry",
+			currentRetryCount: 2,
+			expected:          4,
+		},
+		{
+			name:              "caps at max delay",
+			currentRetryCount: 10,
+			expected:          60,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := retryDelaySeconds(tt.currentRetryCount)
+			if got != tt.expected {
+				t.Fatalf("expected %d, got %d", tt.expected, got)
+			}
+		})
 	}
 }
