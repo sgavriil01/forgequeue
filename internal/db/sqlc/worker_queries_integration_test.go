@@ -2,9 +2,12 @@ package db
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -183,5 +186,138 @@ func truncateJobs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	_, err := pool.Exec(ctx, "TRUNCATE TABLE jobs")
 	if err != nil {
 		t.Fatalf("truncate jobs: %v", err)
+	}
+}
+
+func TestScheduleJobRetrySetsRunAtAndErrorMessage(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	truncateJobs(t, ctx, pool)
+
+	queries := New(pool)
+
+	_, err = queries.CreateJob(ctx, CreateJobParams{
+		Kind:       "retry_run_at_test",
+		Payload:    []byte(`{}`),
+		MaxRetries: 3,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	claimed, err := queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "worker-1",
+		LeaseSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+
+	const delaySeconds int32 = 30
+
+	before := time.Now().UTC()
+
+	retried, err := queries.ScheduleJobRetry(ctx, ScheduleJobRetryParams{
+		ID:           claimed.ID,
+		WorkerID:     "worker-1",
+		ErrorMessage: "temporary failure",
+		DelaySeconds: delaySeconds,
+	})
+	if err != nil {
+		t.Fatalf("schedule retry: %v", err)
+	}
+
+	after := time.Now().UTC()
+
+	if retried.Status != JobStatusPending {
+		t.Fatalf("expected pending, got %s", retried.Status)
+	}
+
+	if retried.RetryCount != 1 {
+		t.Fatalf("expected retry_count 1, got %d", retried.RetryCount)
+	}
+
+	if !retried.ErrorMessage.Valid {
+		t.Fatalf("expected error_message to be valid")
+	}
+
+	if retried.ErrorMessage.String != "temporary failure" {
+		t.Fatalf("expected error_message temporary failure, got %s", retried.ErrorMessage.String)
+	}
+
+	earliest := before.Add(time.Duration(delaySeconds) * time.Second)
+	latest := after.Add(time.Duration(delaySeconds) * time.Second).Add(1 * time.Second)
+
+	if retried.RunAt.Time.Before(earliest) {
+		t.Fatalf("expected run_at after %v, got %v", earliest, retried.RunAt.Time)
+	}
+
+	if retried.RunAt.Time.After(latest) {
+		t.Fatalf("expected run_at before %v, got %v", latest, retried.RunAt.Time)
+	}
+}
+
+func TestDeadJobIsNotClaimedAgain(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	truncateJobs(t, ctx, pool)
+
+	queries := New(pool)
+
+	_, err = queries.CreateJob(ctx, CreateJobParams{
+		Kind:       "dead_job_claim_test",
+		Payload:    []byte(`{}`),
+		MaxRetries: 1,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	claimed, err := queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "worker-1",
+		LeaseSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+
+	_, err = queries.MarkJobDead(ctx, MarkJobDeadParams{
+		ID:           claimed.ID,
+		WorkerID:     "worker-1",
+		ErrorMessage: "permanent failure",
+	})
+	if err != nil {
+		t.Fatalf("mark job dead: %v", err)
+	}
+
+	_, err = queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "worker-2",
+		LeaseSeconds: 30,
+	})
+
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("expected no claimable jobs, got %v", err)
 	}
 }

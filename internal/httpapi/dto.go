@@ -29,7 +29,7 @@ type jobResponse struct {
 	UpdatedAt    any             `json:"updated_at"`
 	RetryCount   int32           `json:"retry_count"`
 	MaxRetries   int32           `json:"max_retries"`
-	ErrorMessage any             `json:"error_message,omitempty"`
+	ErrorMessage *string             `json:"error_message,omitempty"`
 }
 
 func toJobResponse(job db.Job) jobResponse {
@@ -44,7 +44,7 @@ func toJobResponse(job db.Job) jobResponse {
 		UpdatedAt:    job.UpdatedAt,
 		RetryCount:   job.RetryCount,
 		MaxRetries:   job.MaxRetries,
-		ErrorMessage: job.ErrorMessage,
+		ErrorMessage: textPtr(job.ErrorMessage),
 	}
 }
 
@@ -85,4 +85,12 @@ func uuidToString(id pgtype.UUID) string {
 		b[8:10],
 		b[10:16],
 	)
+}
+
+func textPtr(value pgtype.Text) *string {
+	if !value.Valid {
+		return nil
+	}
+
+	return &value.String
 }

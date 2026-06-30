@@ -178,7 +178,7 @@ func TestSingleJobIsClaimedByExactlyOneWorker(t *testing.T) {
 	}
 }
 
-func TestWorkerPoolRecoversFromPanicAndContinues(t *testing.T) {
+func TestWorkerPoolRetriesPanicAndContinues(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
@@ -241,23 +241,84 @@ func TestWorkerPoolRecoversFromPanicAndContinues(t *testing.T) {
 	defer workerPool.Stop()
 
 	waitUntilIntegration(t, func() bool {
-		failed := countJobsByKindAndStatus(t, ctx, pool, panicKind, db.JobStatusFailed)
+		pendingRetry := countJobsByKindAndStatus(t, ctx, pool, panicKind, db.JobStatusPending)
 		completed := countJobsByKindAndStatus(t, ctx, pool, normalKind, db.JobStatusCompleted)
 
-		return failed == 1 && completed == 1
+		return pendingRetry == 1 && completed == 1
 	}, 5*time.Second)
 
 	workerPool.Stop()
 
-	failed := countJobsByKindAndStatus(t, ctx, pool, panicKind, db.JobStatusFailed)
+	pendingRetry := countJobsByKindAndStatus(t, ctx, pool, panicKind, db.JobStatusPending)
 	completed := countJobsByKindAndStatus(t, ctx, pool, normalKind, db.JobStatusCompleted)
 
-	if failed != 1 {
-		t.Fatalf("expected 1 failed job, got %d", failed)
+	if pendingRetry != 1 {
+		t.Fatalf("expected 1 pending retry job, got %d", pendingRetry)
 	}
 
 	if completed != 1 {
 		t.Fatalf("expected 1 completed job, got %d", completed)
+	}
+}
+
+func TestWorkerPoolMarksJobDeadWhenRetriesExhausted(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+	pool := openTestDB(t, ctx, dbURL)
+	defer pool.Close()
+
+	truncateJobsForWorkerTest(t, ctx, pool)
+
+	queries := db.New(pool)
+
+	kind := "dead_job"
+
+	_, err := queries.CreateJob(ctx, db.CreateJobParams{
+		Kind:       kind,
+		Payload:    []byte(`{}`),
+		MaxRetries: 1,
+	})
+	if err != nil {
+		t.Fatalf("create dead job: %v", err)
+	}
+
+	registry, err := NewRegistry(
+		NewHandlerFunc(kind, func(ctx context.Context, job db.Job) error {
+			return errors.New("always fails")
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	workerPool := NewExecutorPool(
+		queries,
+		registry,
+		PoolConfig{
+			NumWorkers:   1,
+			PollInterval: 5 * time.Millisecond,
+			IdleJitter:   1 * time.Millisecond,
+			LeaseSeconds: 30,
+		},
+		discardLogger(),
+	)
+
+	workerPool.Start(ctx)
+	defer workerPool.Stop()
+
+	waitUntilIntegration(t, func() bool {
+		return countJobsByKindAndStatus(t, ctx, pool, kind, db.JobStatusDead) == 1
+	}, 5*time.Second)
+
+	workerPool.Stop()
+
+	dead := countJobsByKindAndStatus(t, ctx, pool, kind, db.JobStatusDead)
+	if dead != 1 {
+		t.Fatalf("expected 1 dead job, got %d", dead)
 	}
 }
 

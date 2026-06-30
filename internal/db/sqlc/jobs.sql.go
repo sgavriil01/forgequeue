@@ -305,6 +305,49 @@ func (q *Queries) MarkJobCompleted(ctx context.Context, arg MarkJobCompletedPara
 	return i, err
 }
 
+const markJobDead = `-- name: MarkJobDead :one
+UPDATE jobs
+SET status = 'dead',
+    retry_count = retry_count + 1,
+    error_message = $1::text,
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+WHERE id = $2
+  AND locked_by = $3::text
+  AND status = 'running'
+RETURNING id, kind, payload, status, priority, run_at, created_at, updated_at, attempted_at, completed_at, retry_count, max_retries, error_message, locked_by, locked_until
+`
+
+type MarkJobDeadParams struct {
+	ErrorMessage string
+	ID           pgtype.UUID
+	WorkerID     string
+}
+
+func (q *Queries) MarkJobDead(ctx context.Context, arg MarkJobDeadParams) (Job, error) {
+	row := q.db.QueryRow(ctx, markJobDead, arg.ErrorMessage, arg.ID, arg.WorkerID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Payload,
+		&i.Status,
+		&i.Priority,
+		&i.RunAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AttemptedAt,
+		&i.CompletedAt,
+		&i.RetryCount,
+		&i.MaxRetries,
+		&i.ErrorMessage,
+		&i.LockedBy,
+		&i.LockedUntil,
+	)
+	return i, err
+}
+
 const markJobFailed = `-- name: MarkJobFailed :one
 UPDATE jobs
 SET status = 'failed',
@@ -356,4 +399,54 @@ func (q *Queries) Ping(ctx context.Context) (int32, error) {
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const scheduleJobRetry = `-- name: ScheduleJobRetry :one
+UPDATE jobs
+SET status = 'pending',
+    retry_count = retry_count + 1,
+    error_message = $1::text,
+    run_at = clock_timestamp() + ($2::int * INTERVAL '1 second'),
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+WHERE id = $3
+  AND locked_by = $4::text
+  AND status = 'running'
+RETURNING id, kind, payload, status, priority, run_at, created_at, updated_at, attempted_at, completed_at, retry_count, max_retries, error_message, locked_by, locked_until
+`
+
+type ScheduleJobRetryParams struct {
+	ErrorMessage string
+	DelaySeconds int32
+	ID           pgtype.UUID
+	WorkerID     string
+}
+
+func (q *Queries) ScheduleJobRetry(ctx context.Context, arg ScheduleJobRetryParams) (Job, error) {
+	row := q.db.QueryRow(ctx, scheduleJobRetry,
+		arg.ErrorMessage,
+		arg.DelaySeconds,
+		arg.ID,
+		arg.WorkerID,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Payload,
+		&i.Status,
+		&i.Priority,
+		&i.RunAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AttemptedAt,
+		&i.CompletedAt,
+		&i.RetryCount,
+		&i.MaxRetries,
+		&i.ErrorMessage,
+		&i.LockedBy,
+		&i.LockedUntil,
+	)
+	return i, err
 }
