@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 )
 
 type fakeOneShotExecutor struct {
@@ -17,6 +19,8 @@ func (f fakeOneShotExecutor) ExecuteOnce(ctx context.Context) (bool, error) {
 }
 
 func TestPoolStartsConfiguredNumberOfWorkers(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	var factoryCalls int32
 
 	pool := NewPool(PoolConfig{
@@ -32,6 +36,7 @@ func TestPoolStartsConfiguredNumberOfWorkers(t *testing.T) {
 			},
 		}
 	}, nil)
+	t.Cleanup(pool.Stop)
 
 	pool.Start(context.Background())
 
@@ -47,6 +52,8 @@ func TestPoolStartsConfiguredNumberOfWorkers(t *testing.T) {
 }
 
 func TestPoolCallsExecutorRepeatedly(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	var calls int32
 
 	pool := NewPool(PoolConfig{
@@ -61,6 +68,7 @@ func TestPoolCallsExecutorRepeatedly(t *testing.T) {
 			},
 		}
 	}, nil)
+	t.Cleanup(pool.Stop)
 
 	pool.Start(context.Background())
 
@@ -76,6 +84,8 @@ func TestPoolCallsExecutorRepeatedly(t *testing.T) {
 }
 
 func TestPoolContinuesAfterExecutorError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	var calls int32
 
 	pool := NewPool(PoolConfig{
@@ -90,6 +100,7 @@ func TestPoolContinuesAfterExecutorError(t *testing.T) {
 			},
 		}
 	}, nil)
+	t.Cleanup(pool.Stop)
 
 	pool.Start(context.Background())
 
@@ -105,6 +116,8 @@ func TestPoolContinuesAfterExecutorError(t *testing.T) {
 }
 
 func TestPoolStopsWhenContextIsCancelled(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	var calls int32
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,6 +134,7 @@ func TestPoolStopsWhenContextIsCancelled(t *testing.T) {
 			},
 		}
 	}, nil)
+	t.Cleanup(pool.Stop)
 
 	pool.Start(ctx)
 

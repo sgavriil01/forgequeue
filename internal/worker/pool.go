@@ -144,7 +144,7 @@ func (p *Pool) runWorker(ctx context.Context, workerID string) {
 		default:
 		}
 
-		processed, err := executor.ExecuteOnce(ctx)
+		processed, err := executor.ExecuteOnce(context.Background())
 		if err != nil {
 			p.logger.Error("worker execute failed", "worker_id", workerID, "error", err)
 		}
