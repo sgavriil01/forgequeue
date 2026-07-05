@@ -89,11 +89,20 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 
 	startedAt := time.Now()
 
+	queueLatency := time.Duration(0)
+	if job.CreatedAt.Valid {
+		queueLatency = time.Since(job.CreatedAt.Time)
+	}
+
+	metrics.RecordJobStarted(job.Kind, queueLatency)
+	defer metrics.RecordJobFinished()
+
 	e.logger.Info(
 		"job claimed",
 		"job_id", job.ID,
-		"kind", job.Kind,
 		"worker_id", e.workerID,
+		"kind", job.Kind,
+		"queue_latency", queueLatency.String(),
 	)
 
 	handler, ok := e.registry.HandlerFor(job.Kind)
@@ -129,8 +138,8 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 			e.logger.Warn(
 				"job lease lost before completion",
 				"job_id", job.ID,
-				"kind", job.Kind,
 				"worker_id", e.workerID,
+				"kind", job.Kind,
 			)
 
 			return true, nil
@@ -139,14 +148,17 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("mark job completed: %w", err)
 	}
 
-	metrics.RecordJobCompleted(job.Kind, time.Since(startedAt))
+	duration := time.Since(startedAt)
 
 	e.logger.Info(
 		"job completed",
 		"job_id", job.ID,
-		"kind", job.Kind,
 		"worker_id", e.workerID,
+		"kind", job.Kind,
+		"duration", duration.String(),
 	)
+
+	metrics.RecordJobCompleted(job.Kind, duration)
 
 	return true, nil
 }
@@ -173,8 +185,8 @@ func (e *Executor) startHeartbeat(ctx context.Context, job db.Job) (context.Cont
 					e.logger.Error(
 						"job lease renewal failed",
 						"job_id", job.ID,
-						"kind", job.Kind,
 						"worker_id", e.workerID,
+						"kind", job.Kind,
 						"error", err,
 					)
 
@@ -185,8 +197,8 @@ func (e *Executor) startHeartbeat(ctx context.Context, job db.Job) (context.Cont
 				e.logger.Debug(
 					"job lease renewed",
 					"job_id", job.ID,
-					"kind", job.Kind,
 					"worker_id", e.workerID,
+					"kind", job.Kind,
 				)
 
 			case <-heartbeatCtx.Done():
@@ -209,6 +221,7 @@ func (e *Executor) runHandler(ctx context.Context, handler JobHandler, job db.Jo
 			e.logger.Error(
 				"job handler panicked",
 				"job_id", job.ID,
+				"worker_id", e.workerID,
 				"kind", job.Kind,
 				"panic", recovered,
 				"stack", string(debug.Stack()),
@@ -237,8 +250,8 @@ func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string
 				e.logger.Warn(
 					"job lease lost before marking dead",
 					"job_id", job.ID,
-					"kind", job.Kind,
 					"worker_id", e.workerID,
+					"kind", job.Kind,
 				)
 
 				return nil
@@ -247,17 +260,20 @@ func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string
 			return fmt.Errorf("mark job dead: %w", err)
 		}
 
-		metrics.RecordJobDead(job.Kind, time.Since(startedAt))
+		duration := time.Since(startedAt)
 
-		e.logger.Info(
-			"job dead",
+		e.logger.Error(
+			"job moved to dead state",
 			"job_id", job.ID,
-			"kind", job.Kind,
 			"worker_id", e.workerID,
+			"kind", job.Kind,
 			"retry_count", nextRetryCount,
 			"max_retries", job.MaxRetries,
 			"error", message,
+			"duration", duration.String(),
 		)
+
+		metrics.RecordJobDead(job.Kind, duration)
 
 		return nil
 	}
@@ -275,8 +291,8 @@ func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string
 			e.logger.Warn(
 				"job lease lost before scheduling retry",
 				"job_id", job.ID,
-				"kind", job.Kind,
 				"worker_id", e.workerID,
+				"kind", job.Kind,
 			)
 
 			return nil
@@ -285,18 +301,21 @@ func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string
 		return fmt.Errorf("schedule job retry: %w", err)
 	}
 
-	metrics.RecordJobRetried(job.Kind, time.Since(startedAt))
+	duration := time.Since(startedAt)
 
-	e.logger.Info(
-		"job retry scheduled",
+	e.logger.Warn(
+		"job scheduled for retry",
 		"job_id", job.ID,
-		"kind", job.Kind,
 		"worker_id", e.workerID,
+		"kind", job.Kind,
 		"retry_count", nextRetryCount,
 		"max_retries", job.MaxRetries,
 		"delay_seconds", delaySeconds,
 		"error", message,
+		"duration", duration.String(),
 	)
+
+	metrics.RecordJobRetried(job.Kind, duration)
 
 	return nil
 }
