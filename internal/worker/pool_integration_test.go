@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -384,6 +385,113 @@ func TestWorkerPoolShutdownLeavesNoRunningJobs(t *testing.T) {
 	running := countJobsByKindAndStatus(t, ctx, pool, kind, db.JobStatusRunning)
 	if running != 0 {
 		t.Fatalf("expected 0 running jobs after shutdown, got %d", running)
+	}
+}
+
+func TestWorkerPoolReclaimsExpiredRunningJobAndCompletesIt(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+	pool := openTestDB(t, ctx, dbURL)
+	defer pool.Close()
+
+	truncateJobsForWorkerTest(t, ctx, pool)
+
+	queries := db.New(pool)
+
+	kind := "expired_reclaimed_and_completed"
+
+	created, err := queries.CreateJob(ctx, db.CreateJobParams{
+		Kind:       kind,
+		Payload:    []byte(`{}`),
+		MaxRetries: 3,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	claimed, err := queries.ClaimNextJob(ctx, db.ClaimNextJobParams{
+		WorkerID:     "crashed-worker",
+		LeaseSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("claim job as crashed worker: %v", err)
+	}
+
+	if claimed.ID != created.ID {
+		t.Fatalf("expected claimed job %v, got %v", created.ID, claimed.ID)
+	}
+
+	_, err = pool.Exec(
+		ctx,
+		"UPDATE jobs SET locked_until = clock_timestamp() - INTERVAL '1 second' WHERE id = $1",
+		claimed.ID,
+	)
+	if err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	var handlerCalls int32
+
+	registry, err := NewRegistry(
+		NewHandlerFunc(kind, func(ctx context.Context, job db.Job) error {
+			atomic.AddInt32(&handlerCalls, 1)
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	workerPool := NewExecutorPool(
+		queries,
+		registry,
+		PoolConfig{
+			NumWorkers:      1,
+			PollInterval:    5 * time.Millisecond,
+			IdleJitter:      1 * time.Millisecond,
+			LeaseSeconds:    30,
+			ReclaimInterval: 5 * time.Millisecond,
+			ReclaimJobLimit: 10,
+		},
+		discardLogger(),
+	)
+
+	workerPool.Start(ctx)
+	defer workerPool.Stop()
+
+	waitUntilIntegration(t, func() bool {
+		return countJobsByKindAndStatus(t, ctx, pool, kind, db.JobStatusCompleted) == 1
+	}, 5*time.Second)
+
+	workerPool.Stop()
+
+	if got := atomic.LoadInt32(&handlerCalls); got != 1 {
+		t.Fatalf("expected handler to be called once, got %d", got)
+	}
+
+	finalJob, err := queries.GetJobByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get final job: %v", err)
+	}
+
+	if finalJob.Status != db.JobStatusCompleted {
+		t.Fatalf("expected completed, got %s", finalJob.Status)
+	}
+
+	if finalJob.RetryCount != 1 {
+		t.Fatalf("expected retry_count 1 after reclaim, got %d", finalJob.RetryCount)
+	}
+
+	if finalJob.LockedBy.Valid {
+		t.Fatalf("expected locked_by to be cleared")
+	}
+
+	if finalJob.LockedUntil.Valid {
+		t.Fatalf("expected locked_until to be cleared")
 	}
 }
 
