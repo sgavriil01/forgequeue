@@ -9,6 +9,9 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -36,6 +39,28 @@ func run(ctx context.Context, getenv func(string) string) error {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	metricsServer := &http.Server{
+		Addr:    ":9090",
+		Handler: promhttp.Handler(),
+	}
+
+	go func() {
+		logger.Info("worker metrics server started", "addr", metricsServer.Addr)
+
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("worker metrics server failed", "error", err)
+		}
+	}()
+
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("worker metrics server shutdown failed", "error", err)
+		}
+	}()
 
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {

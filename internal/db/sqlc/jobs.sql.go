@@ -92,6 +92,19 @@ func (q *Queries) ClaimNextJob(ctx context.Context, arg ClaimNextJobParams) (Job
 	return i, err
 }
 
+const countJobsByStatus = `-- name: CountJobsByStatus :one
+SELECT COUNT(*)
+FROM jobs
+WHERE status = $1
+`
+
+func (q *Queries) CountJobsByStatus(ctx context.Context, status JobStatus) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByStatus, status)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createJob = `-- name: CreateJob :one
 INSERT INTO jobs (
     kind,

@@ -64,6 +64,10 @@ func (f fakeEndpointJobService) CancelJob(ctx context.Context, id pgtype.UUID) (
 	return f.cancelJob, nil
 }
 
+func (f fakeEndpointJobService) CountJobsByStatus(ctx context.Context, status db.JobStatus) (int64, error) {
+	return 0, nil
+}
+
 func TestCreateJobReturnsCreated(t *testing.T) {
 	id, err := parseUUID("11111111-1111-1111-1111-111111111111")
 	if err != nil {

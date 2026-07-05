@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	db "github.com/sgavriil01/forgequeue/internal/db/sqlc"
@@ -17,8 +16,9 @@ type JobService interface {
 	Ping(ctx context.Context) error
 	CreateJob(ctx context.Context, input jobs.CreateJobInput) (db.Job, error)
 	GetJob(ctx context.Context, id pgtype.UUID) (db.Job, error)
-	ListJobs(ctx context.Context, status *db.JobStatus,  limit int32) ([]db.Job, error)
+	ListJobs(ctx context.Context, status *db.JobStatus, limit int32) ([]db.Job, error)
 	CancelJob(ctx context.Context, id pgtype.UUID) (db.Job, error)
+	CountJobsByStatus(ctx context.Context, status db.JobStatus) (int64, error)
 }
 
 type Server struct {
@@ -40,7 +40,8 @@ func NewServer(jobService JobService, logger *slog.Logger) *Server {
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 
-	r.Use(middleware.Recoverer)
+	r.Use(logRequests(s.logger))
+	r.Use(recoverPanic(s.logger))
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
@@ -49,6 +50,8 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/jobs/{id}", s.handleGetJob)
 	r.Get("/jobs", s.handleListJobs)
 	r.Post("/jobs/{id}/cancel", s.handleCancelJob)
+
+	r.Get("/metrics", s.handleMetrics)
 
 	return r
 }

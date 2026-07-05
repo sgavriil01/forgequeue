@@ -151,5 +151,10 @@ FROM expired
 WHERE jobs.id = expired.id
 RETURNING jobs.*;
 
+-- name: CountJobsByStatus :one
+SELECT COUNT(*)
+FROM jobs
+WHERE status = sqlc.arg(status);
+
 -- name: Ping :one
 SELECT 1;

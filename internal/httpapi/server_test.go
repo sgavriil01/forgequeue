@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -35,6 +37,10 @@ func (f fakeJobService) ListJobs(ctx context.Context, status *db.JobStatus, limi
 
 func (f fakeJobService) CancelJob(ctx context.Context, id pgtype.UUID) (db.Job, error) {
 	return db.Job{}, nil
+}
+
+func (f fakeJobService) CountJobsByStatus(ctx context.Context, status db.JobStatus) (int64, error) {
+	return 0, nil
 }
 
 func TestHealthzReturnsOK(t *testing.T) {
@@ -73,5 +79,37 @@ func TestReadyzReturnsServiceUnavailableWhenDatabaseIsNotReady(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, rec.Code)
+	}
+}
+
+func TestRequestIDHeaderIsAdded(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer(fakeJobService{}, logger)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	requestID := rec.Header().Get("X-Request-ID")
+	if requestID == "" {
+		t.Fatal("expected X-Request-ID header to be set")
+	}
+}
+
+func TestRequestIDHeaderUsesIncomingValue(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer(fakeJobService{}, logger)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("X-Request-ID", "manual-test-123")
+
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	requestID := rec.Header().Get("X-Request-ID")
+	if requestID != "manual-test-123" {
+		t.Fatalf("expected request id %q, got %q", "manual-test-123", requestID)
 	}
 }
