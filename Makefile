@@ -55,3 +55,17 @@ load-test:
 		-e VUS="$(LOAD_VUS)" \
 		-e MAX_VUS="$(LOAD_MAX_VUS)" \
 		grafana/k6 run - < loadtest/create_jobs.js
+
+LOAD_JOBS ?= 1000
+LOAD_VUS ?= 20
+LOAD_MAX_DURATION ?= 2m
+API_URL ?= http://localhost:8080
+
+.PHONY: load-submit
+load-submit:
+	docker run --rm -i --network host \
+		-e API_URL="$(API_URL)" \
+		-e JOBS="$(LOAD_JOBS)" \
+		-e VUS="$(LOAD_VUS)" \
+		-e MAX_DURATION="$(LOAD_MAX_DURATION)" \
+		grafana/k6 run - < load-tests/submit_jobs.js
