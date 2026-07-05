@@ -169,3 +169,7 @@ func normalizePayload(payload json.RawMessage) ([]byte, error) {
 
 	return payload, nil
 }
+
+func (s *Service) CountJobsByStatus(ctx context.Context, status db.JobStatus) (int64, error) {
+	return s.queries.CountJobsByStatus(ctx, status)
+}

@@ -47,6 +47,14 @@ var (
 		},
 		[]string{"kind", "result"},
 	)
+
+	jobsByStatus = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "forgequeue_jobs_by_status",
+			Help: "Current number of jobs by status.",
+		},
+		[]string{"status"},
+	)
 )
 
 func init() {
@@ -56,6 +64,7 @@ func init() {
 		jobsDeadTotal,
 		jobsReclaimedTotal,
 		jobDurationSeconds,
+		jobsByStatus,
 	)
 }
 
@@ -76,4 +85,8 @@ func RecordJobDead(kind string, duration time.Duration) {
 
 func RecordJobReclaimed(kind string, status string) {
 	jobsReclaimedTotal.WithLabelValues(kind, status).Inc()
+}
+
+func SetJobsByStatus(status string, count int64) {
+	jobsByStatus.WithLabelValues(status).Set(float64(count))
 }

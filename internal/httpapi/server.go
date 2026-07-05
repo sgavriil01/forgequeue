@@ -11,7 +11,6 @@ import (
 
 	db "github.com/sgavriil01/forgequeue/internal/db/sqlc"
 	"github.com/sgavriil01/forgequeue/internal/jobs"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type JobService interface {
@@ -20,6 +19,7 @@ type JobService interface {
 	GetJob(ctx context.Context, id pgtype.UUID) (db.Job, error)
 	ListJobs(ctx context.Context, status *db.JobStatus,  limit int32) ([]db.Job, error)
 	CancelJob(ctx context.Context, id pgtype.UUID) (db.Job, error)
+	CountJobsByStatus(ctx context.Context, status db.JobStatus) (int64, error)
 }
 
 type Server struct {
@@ -51,7 +51,7 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/jobs", s.handleListJobs)
 	r.Post("/jobs/{id}/cancel", s.handleCancelJob)
 
-	r.Handle("/metrics", promhttp.Handler())
+	r.Get("/metrics", s.handleMetrics)
 
 	return r
 }

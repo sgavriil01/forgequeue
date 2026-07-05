@@ -37,6 +37,10 @@ func (f fakeJobService) CancelJob(ctx context.Context, id pgtype.UUID) (db.Job, 
 	return db.Job{}, nil
 }
 
+func (f fakeJobService) CountJobsByStatus(ctx context.Context, status db.JobStatus) (int64, error) {
+	return 0, nil
+}
+
 func TestHealthzReturnsOK(t *testing.T) {
 	server := NewServer(fakeJobService{}, nil)
 
