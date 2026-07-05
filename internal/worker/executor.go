@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	db "github.com/sgavriil01/forgequeue/internal/db/sqlc"
+	"github.com/sgavriil01/forgequeue/internal/metrics"
 )
 
 const (
@@ -86,6 +87,8 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("claim job: %w", err)
 	}
 
+	startedAt := time.Now()
+
 	e.logger.Info(
 		"job claimed",
 		"job_id", job.ID,
@@ -96,7 +99,7 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 	handler, ok := e.registry.HandlerFor(job.Kind)
 	if !ok {
 		message := fmt.Sprintf("no handler registered for job kind: %s", job.Kind)
-		if err := e.handleFailure(ctx, job, message); err != nil {
+		if err := e.handleFailure(ctx, job, message, startedAt); err != nil {
 			return true, err
 		}
 
@@ -110,7 +113,7 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 	stopHeartbeat()
 
 	if handlerErr != nil {
-		if markErr := e.handleFailure(ctx, job, handlerErr.Error()); markErr != nil {
+		if markErr := e.handleFailure(ctx, job, handlerErr.Error(), startedAt); markErr != nil {
 			return true, markErr
 		}
 
@@ -135,6 +138,8 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 
 		return true, fmt.Errorf("mark job completed: %w", err)
 	}
+
+	metrics.RecordJobCompleted(job.Kind, time.Since(startedAt))
 
 	e.logger.Info(
 		"job completed",
@@ -216,7 +221,7 @@ func (e *Executor) runHandler(ctx context.Context, handler JobHandler, job db.Jo
 	return handler.Handle(ctx, job)
 }
 
-func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string) error {
+func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string, startedAt time.Time) error {
 	message = truncate(message, defaultErrorMessageLimit)
 
 	nextRetryCount := job.RetryCount + 1
@@ -241,6 +246,8 @@ func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string
 
 			return fmt.Errorf("mark job dead: %w", err)
 		}
+
+		metrics.RecordJobDead(job.Kind, time.Since(startedAt))
 
 		e.logger.Info(
 			"job dead",
@@ -277,6 +284,8 @@ func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string
 
 		return fmt.Errorf("schedule job retry: %w", err)
 	}
+
+	metrics.RecordJobRetried(job.Kind, time.Since(startedAt))
 
 	e.logger.Info(
 		"job retry scheduled",
