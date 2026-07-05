@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -26,6 +27,12 @@ type fakeStore struct {
 	deadCalled bool
 	deadParams db.MarkJobDeadParams
 	deadErr    error
+
+	renewCalled bool
+	renewParams db.RenewJobLeaseParams
+	renewErr    error
+
+	renewFunc func(ctx context.Context, arg db.RenewJobLeaseParams) (db.Job, error)
 }
 
 func (f *fakeStore) ClaimNextJob(ctx context.Context, arg db.ClaimNextJobParams) (db.Job, error) {
@@ -84,6 +91,27 @@ func testUUID() pgtype.UUID {
 		Bytes: [16]byte{1, 2, 3, 4, 5},
 		Valid: true,
 	}
+}
+
+func (f *fakeStore) RenewJobLease(ctx context.Context, arg db.RenewJobLeaseParams) (db.Job, error) {
+	f.renewCalled = true
+	f.renewParams = arg
+
+	if f.renewFunc != nil {
+		return f.renewFunc(ctx, arg)
+	}
+
+	if f.renewErr != nil {
+		return db.Job{}, f.renewErr
+	}
+
+	return db.Job{
+		ID:          arg.ID,
+		Status:      db.JobStatusRunning,
+		RetryCount:  f.claimJob.RetryCount,
+		MaxRetries:  f.claimJob.MaxRetries,
+		LockedUntil: pgtype.Timestamptz{Time: time.Now().Add(time.Duration(arg.LeaseSeconds) * time.Second), Valid: true},
+	}, nil
 }
 
 func TestExecuteOnceReturnsFalseWhenNoJobAvailable(t *testing.T) {
@@ -427,5 +455,175 @@ func TestRetryDelaySeconds(t *testing.T) {
 				t.Fatalf("expected %d, got %d", tt.expected, got)
 			}
 		})
+	}
+}
+
+func TestExecuteOnceRenewsLeaseWhileHandlerRuns(t *testing.T) {
+	jobID := testUUID()
+
+	renewed := make(chan db.RenewJobLeaseParams, 1)
+
+	store := &fakeStore{
+		claimJob: db.Job{
+			ID:         jobID,
+			Kind:       "long_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 0,
+			MaxRetries: 3,
+		},
+	}
+
+	store.renewFunc = func(ctx context.Context, arg db.RenewJobLeaseParams) (db.Job, error) {
+		select {
+		case renewed <- arg:
+		default:
+		}
+
+		return db.Job{
+			ID:          arg.ID,
+			Status:      db.JobStatusRunning,
+			RetryCount:  store.claimJob.RetryCount,
+			MaxRetries:  store.claimJob.MaxRetries,
+			LockedUntil: pgtype.Timestamptz{Time: time.Now().Add(time.Duration(arg.LeaseSeconds) * time.Second), Valid: true},
+		}, nil
+	}
+
+	handlerCanFinish := make(chan struct{})
+
+	handler := NewHandlerFunc("long_job", func(ctx context.Context, job db.Job) error {
+		select {
+		case <-renewed:
+			close(handlerCanFinish)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+			return errors.New("timed out waiting for heartbeat")
+		}
+	})
+
+	registry, err := NewRegistry(handler)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	executor := NewExecutorWithHeartbeat(
+		store,
+		registry,
+		"worker-1",
+		30,
+		10*time.Millisecond,
+		nil,
+	)
+
+	processed, err := executor.ExecuteOnce(context.Background())
+	if err != nil {
+		t.Fatalf("execute once: %v", err)
+	}
+
+	if !processed {
+		t.Fatalf("expected processed=true")
+	}
+
+	if !store.completedCalled {
+		t.Fatalf("expected completed to be called")
+	}
+
+	if store.retryCalled {
+		t.Fatalf("did not expect retry to be called")
+	}
+
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
+	}
+
+	select {
+	case <-handlerCanFinish:
+	default:
+		t.Fatalf("expected handler to finish after heartbeat")
+	}
+
+	if !store.renewCalled {
+		t.Fatalf("expected renew lease to be called")
+	}
+
+	if store.renewParams.ID != jobID {
+		t.Fatalf("expected renewed job id %v, got %v", jobID, store.renewParams.ID)
+	}
+
+	if store.renewParams.WorkerID != "worker-1" {
+		t.Fatalf("expected worker-1, got %s", store.renewParams.WorkerID)
+	}
+
+	if store.renewParams.LeaseSeconds != 30 {
+		t.Fatalf("expected lease seconds 30, got %d", store.renewParams.LeaseSeconds)
+	}
+}
+
+func TestExecuteOnceCancelsHandlerWhenLeaseRenewalFails(t *testing.T) {
+	jobID := testUUID()
+
+	store := &fakeStore{
+		claimJob: db.Job{
+			ID:         jobID,
+			Kind:       "long_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 0,
+			MaxRetries: 3,
+		},
+		renewErr: errors.New("database unavailable"),
+	}
+
+	handlerCancelled := make(chan struct{})
+
+	handler := NewHandlerFunc("long_job", func(ctx context.Context, job db.Job) error {
+		<-ctx.Done()
+		close(handlerCancelled)
+		return ctx.Err()
+	})
+
+	registry, err := NewRegistry(handler)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	executor := NewExecutorWithHeartbeat(
+		store,
+		registry,
+		"worker-1",
+		30,
+		10*time.Millisecond,
+		nil,
+	)
+
+	processed, err := executor.ExecuteOnce(context.Background())
+	if err != nil {
+		t.Fatalf("execute once: %v", err)
+	}
+
+	if !processed {
+		t.Fatalf("expected processed=true")
+	}
+
+	select {
+	case <-handlerCancelled:
+	default:
+		t.Fatalf("expected handler context to be cancelled")
+	}
+
+	if !store.renewCalled {
+		t.Fatalf("expected renew lease to be called")
+	}
+
+	if store.completedCalled {
+		t.Fatalf("did not expect completed to be called")
+	}
+
+	if !store.retryCalled {
+		t.Fatalf("expected retry to be called")
+	}
+
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
 	}
 }
