@@ -15,7 +15,7 @@ func TestCreateAndGetJob(t *testing.T) {
 
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://forgequeue:forgequeue@localhost:5433/forgequeue?sslmode=disable"
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
 	}
 
 	pool, err := pgxpool.New(ctx, dbURL)
