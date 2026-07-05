@@ -321,3 +321,287 @@ func TestDeadJobIsNotClaimedAgain(t *testing.T) {
 		t.Fatalf("expected no claimable jobs, got %v", err)
 	}
 }
+
+func TestRenewJobLeaseExtendsLockedUntil(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	truncateJobs(t, ctx, pool)
+
+	queries := New(pool)
+
+	_, err = queries.CreateJob(ctx, CreateJobParams{
+		Kind:       "lease_renew_test",
+		Payload:    []byte(`{}`),
+		MaxRetries: 3,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	claimed, err := queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "worker-1",
+		LeaseSeconds: 1,
+	})
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+
+	if !claimed.LockedUntil.Valid {
+		t.Fatalf("expected locked_until to be valid")
+	}
+
+	oldLockedUntil := claimed.LockedUntil.Time
+
+	time.Sleep(20 * time.Millisecond)
+
+	renewed, err := queries.RenewJobLease(ctx, RenewJobLeaseParams{
+		ID:           claimed.ID,
+		WorkerID:     "worker-1",
+		LeaseSeconds: 60,
+	})
+	if err != nil {
+		t.Fatalf("renew lease: %v", err)
+	}
+
+	if renewed.Status != JobStatusRunning {
+		t.Fatalf("expected running, got %s", renewed.Status)
+	}
+
+	if !renewed.LockedUntil.Valid {
+		t.Fatalf("expected renewed locked_until to be valid")
+	}
+
+	if !renewed.LockedUntil.Time.After(oldLockedUntil) {
+		t.Fatalf("expected locked_until to be extended, old=%v new=%v", oldLockedUntil, renewed.LockedUntil.Time)
+	}
+
+	if !renewed.LockedBy.Valid {
+		t.Fatalf("expected locked_by to be valid")
+	}
+
+	if renewed.LockedBy.String != "worker-1" {
+		t.Fatalf("expected locked_by worker-1, got %s", renewed.LockedBy.String)
+	}
+}
+
+func TestReclaimExpiredJobsMovesExpiredRunningJobToPending(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	truncateJobs(t, ctx, pool)
+
+	queries := New(pool)
+
+	_, err = queries.CreateJob(ctx, CreateJobParams{
+		Kind:       "expired_reclaim_test",
+		Payload:    []byte(`{}`),
+		MaxRetries: 3,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	claimed, err := queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "worker-1",
+		LeaseSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+
+	_, err = pool.Exec(
+		ctx,
+		"UPDATE jobs SET locked_until = clock_timestamp() - INTERVAL '1 second' WHERE id = $1",
+		claimed.ID,
+	)
+	if err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	reclaimed, err := queries.ReclaimExpiredJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("reclaim expired jobs: %v", err)
+	}
+
+	if len(reclaimed) != 1 {
+		t.Fatalf("expected 1 reclaimed job, got %d", len(reclaimed))
+	}
+
+	job := reclaimed[0]
+
+	if job.ID != claimed.ID {
+		t.Fatalf("expected reclaimed id %v, got %v", claimed.ID, job.ID)
+	}
+
+	if job.Status != JobStatusPending {
+		t.Fatalf("expected pending, got %s", job.Status)
+	}
+
+	if job.RetryCount != 1 {
+		t.Fatalf("expected retry_count 1, got %d", job.RetryCount)
+	}
+
+	if job.LockedBy.Valid {
+		t.Fatalf("expected locked_by to be cleared")
+	}
+
+	if job.LockedUntil.Valid {
+		t.Fatalf("expected locked_until to be cleared")
+	}
+
+	if !job.ErrorMessage.Valid {
+		t.Fatalf("expected error_message to be valid")
+	}
+
+	expected := "job lease expired; reclaiming for retry"
+	if job.ErrorMessage.String != expected {
+		t.Fatalf("expected %q, got %q", expected, job.ErrorMessage.String)
+	}
+}
+
+func TestReclaimExpiredJobsDoesNotReclaimActiveLease(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	truncateJobs(t, ctx, pool)
+
+	queries := New(pool)
+
+	_, err = queries.CreateJob(ctx, CreateJobParams{
+		Kind:       "active_lease_test",
+		Payload:    []byte(`{}`),
+		MaxRetries: 3,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	_, err = queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "worker-1",
+		LeaseSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+
+	reclaimed, err := queries.ReclaimExpiredJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("reclaim expired jobs: %v", err)
+	}
+
+	if len(reclaimed) != 0 {
+		t.Fatalf("expected 0 reclaimed jobs, got %d", len(reclaimed))
+	}
+}
+
+func TestReclaimExpiredJobsMarksJobDeadWhenRetriesExhausted(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	truncateJobs(t, ctx, pool)
+
+	queries := New(pool)
+
+	_, err = queries.CreateJob(ctx, CreateJobParams{
+		Kind:       "expired_dead_test",
+		Payload:    []byte(`{}`),
+		MaxRetries: 1,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	claimed, err := queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "worker-1",
+		LeaseSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+
+	_, err = pool.Exec(
+		ctx,
+		"UPDATE jobs SET locked_until = clock_timestamp() - INTERVAL '1 second' WHERE id = $1",
+		claimed.ID,
+	)
+	if err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	reclaimed, err := queries.ReclaimExpiredJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("reclaim expired jobs: %v", err)
+	}
+
+	if len(reclaimed) != 1 {
+		t.Fatalf("expected 1 reclaimed job, got %d", len(reclaimed))
+	}
+
+	job := reclaimed[0]
+
+	if job.Status != JobStatusDead {
+		t.Fatalf("expected dead, got %s", job.Status)
+	}
+
+	if job.RetryCount != 1 {
+		t.Fatalf("expected retry_count 1, got %d", job.RetryCount)
+	}
+
+	if job.LockedBy.Valid {
+		t.Fatalf("expected locked_by to be cleared")
+	}
+
+	if job.LockedUntil.Valid {
+		t.Fatalf("expected locked_until to be cleared")
+	}
+
+	if !job.ErrorMessage.Valid {
+		t.Fatalf("expected error_message to be valid")
+	}
+
+	expected := "job lease expired and max retries exhausted"
+	if job.ErrorMessage.String != expected {
+		t.Fatalf("expected %q, got %q", expected, job.ErrorMessage.String)
+	}
+}
