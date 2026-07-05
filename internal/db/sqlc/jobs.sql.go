@@ -401,6 +401,114 @@ func (q *Queries) Ping(ctx context.Context) (int32, error) {
 	return column_1, err
 }
 
+const reclaimExpiredJobs = `-- name: ReclaimExpiredJobs :many
+WITH expired AS (
+    SELECT id,
+           CASE
+               WHEN retry_count + 1 >= max_retries THEN 'dead'::job_status
+               ELSE 'pending'::job_status
+           END AS next_status
+    FROM jobs
+    WHERE status = 'running'
+      AND locked_until < clock_timestamp()
+    ORDER BY locked_until ASC
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs
+SET status = expired.next_status,
+    retry_count = retry_count + 1,
+    error_message = CASE
+        WHEN expired.next_status = 'dead'::job_status THEN 'job lease expired and max retries exhausted'
+        ELSE 'job lease expired; reclaiming for retry'
+    END,
+    run_at = CASE
+        WHEN expired.next_status = 'pending'::job_status THEN clock_timestamp()
+        ELSE jobs.run_at
+    END,
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+FROM expired
+WHERE jobs.id = expired.id
+RETURNING jobs.id, jobs.kind, jobs.payload, jobs.status, jobs.priority, jobs.run_at, jobs.created_at, jobs.updated_at, jobs.attempted_at, jobs.completed_at, jobs.retry_count, jobs.max_retries, jobs.error_message, jobs.locked_by, jobs.locked_until
+`
+
+func (q *Queries) ReclaimExpiredJobs(ctx context.Context, jobLimit int32) ([]Job, error) {
+	rows, err := q.db.Query(ctx, reclaimExpiredJobs, jobLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.Payload,
+			&i.Status,
+			&i.Priority,
+			&i.RunAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.AttemptedAt,
+			&i.CompletedAt,
+			&i.RetryCount,
+			&i.MaxRetries,
+			&i.ErrorMessage,
+			&i.LockedBy,
+			&i.LockedUntil,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const renewJobLease = `-- name: RenewJobLease :one
+UPDATE jobs
+SET locked_until = clock_timestamp() + ($1::int * INTERVAL '1 second'),
+    updated_at = clock_timestamp()
+WHERE id = $2
+  AND locked_by = $3::text
+  AND status = 'running'
+RETURNING id, kind, payload, status, priority, run_at, created_at, updated_at, attempted_at, completed_at, retry_count, max_retries, error_message, locked_by, locked_until
+`
+
+type RenewJobLeaseParams struct {
+	LeaseSeconds int32
+	ID           pgtype.UUID
+	WorkerID     string
+}
+
+func (q *Queries) RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (Job, error) {
+	row := q.db.QueryRow(ctx, renewJobLease, arg.LeaseSeconds, arg.ID, arg.WorkerID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Payload,
+		&i.Status,
+		&i.Priority,
+		&i.RunAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AttemptedAt,
+		&i.CompletedAt,
+		&i.RetryCount,
+		&i.MaxRetries,
+		&i.ErrorMessage,
+		&i.LockedBy,
+		&i.LockedUntil,
+	)
+	return i, err
+}
+
 const scheduleJobRetry = `-- name: ScheduleJobRetry :one
 UPDATE jobs
 SET status = 'pending',

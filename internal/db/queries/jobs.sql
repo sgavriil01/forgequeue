@@ -110,5 +110,46 @@ WHERE id = sqlc.arg(id)
   AND status = 'running'
 RETURNING *;
 
+-- name: RenewJobLease :one
+UPDATE jobs
+SET locked_until = clock_timestamp() + (sqlc.arg(lease_seconds)::int * INTERVAL '1 second'),
+    updated_at = clock_timestamp()
+WHERE id = sqlc.arg(id)
+  AND locked_by = sqlc.arg(worker_id)::text
+  AND status = 'running'
+RETURNING *;
+
+-- name: ReclaimExpiredJobs :many
+WITH expired AS (
+    SELECT id,
+           CASE
+               WHEN retry_count + 1 >= max_retries THEN 'dead'::job_status
+               ELSE 'pending'::job_status
+           END AS next_status
+    FROM jobs
+    WHERE status = 'running'
+      AND locked_until < clock_timestamp()
+    ORDER BY locked_until ASC
+    LIMIT sqlc.arg(job_limit)
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs
+SET status = expired.next_status,
+    retry_count = retry_count + 1,
+    error_message = CASE
+        WHEN expired.next_status = 'dead'::job_status THEN 'job lease expired and max retries exhausted'
+        ELSE 'job lease expired; reclaiming for retry'
+    END,
+    run_at = CASE
+        WHEN expired.next_status = 'pending'::job_status THEN clock_timestamp()
+        ELSE jobs.run_at
+    END,
+    updated_at = clock_timestamp(),
+    locked_by = NULL,
+    locked_until = NULL
+FROM expired
+WHERE jobs.id = expired.id
+RETURNING jobs.*;
+
 -- name: Ping :one
 SELECT 1;
