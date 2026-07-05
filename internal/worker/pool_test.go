@@ -173,3 +173,73 @@ func waitUntil(t *testing.T, condition func() bool) {
 
 	t.Fatal("condition was not met before timeout")
 }
+
+func TestPoolRunsReclaimerRepeatedly(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	var reclaimCalls int32
+
+	pool := NewPool(PoolConfig{
+		NumWorkers:      1,
+		PollInterval:    5 * time.Millisecond,
+		IdleJitter:      1 * time.Millisecond,
+		ReclaimInterval: 5 * time.Millisecond,
+	}, func(workerID string) OneShotExecutor {
+		return fakeOneShotExecutor{
+			fn: func(ctx context.Context) (bool, error) {
+				return false, nil
+			},
+		}
+	}, nil).WithReclaimer(func(ctx context.Context) error {
+		atomic.AddInt32(&reclaimCalls, 1)
+		return nil
+	})
+	t.Cleanup(pool.Stop)
+
+	pool.Start(context.Background())
+
+	waitUntil(t, func() bool {
+		return atomic.LoadInt32(&reclaimCalls) >= 2
+	})
+
+	pool.Stop()
+
+	if got := atomic.LoadInt32(&reclaimCalls); got < 2 {
+		t.Fatalf("expected reclaimer to run repeatedly, got %d calls", got)
+	}
+}
+
+func TestPoolContinuesAfterReclaimerError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	var reclaimCalls int32
+
+	pool := NewPool(PoolConfig{
+		NumWorkers:      1,
+		PollInterval:    5 * time.Millisecond,
+		IdleJitter:      1 * time.Millisecond,
+		ReclaimInterval: 5 * time.Millisecond,
+	}, func(workerID string) OneShotExecutor {
+		return fakeOneShotExecutor{
+			fn: func(ctx context.Context) (bool, error) {
+				return false, nil
+			},
+		}
+	}, nil).WithReclaimer(func(ctx context.Context) error {
+		atomic.AddInt32(&reclaimCalls, 1)
+		return errors.New("temporary reclaim error")
+	})
+	t.Cleanup(pool.Stop)
+
+	pool.Start(context.Background())
+
+	waitUntil(t, func() bool {
+		return atomic.LoadInt32(&reclaimCalls) >= 2
+	})
+
+	pool.Stop()
+
+	if got := atomic.LoadInt32(&reclaimCalls); got < 2 {
+		t.Fatalf("expected pool to continue after reclaimer error, got %d calls", got)
+	}
+}
