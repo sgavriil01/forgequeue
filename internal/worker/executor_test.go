@@ -627,3 +627,144 @@ func TestExecuteOnceCancelsHandlerWhenLeaseRenewalFails(t *testing.T) {
 		t.Fatalf("did not expect dead to be called")
 	}
 }
+
+func TestExecuteOnceHandlesLostLeaseWhenMarkingCompleted(t *testing.T) {
+	jobID := testUUID()
+
+	store := &fakeStore{
+		claimJob: db.Job{
+			ID:         jobID,
+			Kind:       "test_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 0,
+			MaxRetries: 3,
+		},
+		completedErr: pgx.ErrNoRows,
+	}
+
+	handler := NewHandlerFunc("test_job", func(ctx context.Context, job db.Job) error {
+		return nil
+	})
+
+	registry, err := NewRegistry(handler)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	executor := NewExecutor(store, registry, "worker-1", 30, nil)
+
+	processed, err := executor.ExecuteOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected lost lease completion to be handled gracefully, got %v", err)
+	}
+
+	if !processed {
+		t.Fatalf("expected processed=true")
+	}
+
+	if !store.completedCalled {
+		t.Fatalf("expected completed to be called")
+	}
+
+	if store.retryCalled {
+		t.Fatalf("did not expect retry to be called")
+	}
+
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
+	}
+}
+
+func TestExecuteOnceHandlesLostLeaseWhenSchedulingRetry(t *testing.T) {
+	jobID := testUUID()
+
+	store := &fakeStore{
+		claimJob: db.Job{
+			ID:         jobID,
+			Kind:       "test_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 0,
+			MaxRetries: 3,
+		},
+		retryErr: pgx.ErrNoRows,
+	}
+
+	handler := NewHandlerFunc("test_job", func(ctx context.Context, job db.Job) error {
+		return errors.New("handler failed")
+	})
+
+	registry, err := NewRegistry(handler)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	executor := NewExecutor(store, registry, "worker-1", 30, nil)
+
+	processed, err := executor.ExecuteOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected lost lease retry to be handled gracefully, got %v", err)
+	}
+
+	if !processed {
+		t.Fatalf("expected processed=true")
+	}
+
+	if !store.retryCalled {
+		t.Fatalf("expected retry to be called")
+	}
+
+	if store.completedCalled {
+		t.Fatalf("did not expect completed to be called")
+	}
+
+	if store.deadCalled {
+		t.Fatalf("did not expect dead to be called")
+	}
+}
+
+func TestExecuteOnceHandlesLostLeaseWhenMarkingDead(t *testing.T) {
+	jobID := testUUID()
+
+	store := &fakeStore{
+		claimJob: db.Job{
+			ID:         jobID,
+			Kind:       "test_job",
+			Status:     db.JobStatusRunning,
+			RetryCount: 2,
+			MaxRetries: 3,
+		},
+		deadErr: pgx.ErrNoRows,
+	}
+
+	handler := NewHandlerFunc("test_job", func(ctx context.Context, job db.Job) error {
+		return errors.New("handler failed")
+	})
+
+	registry, err := NewRegistry(handler)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	executor := NewExecutor(store, registry, "worker-1", 30, nil)
+
+	processed, err := executor.ExecuteOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected lost lease dead update to be handled gracefully, got %v", err)
+	}
+
+	if !processed {
+		t.Fatalf("expected processed=true")
+	}
+
+	if !store.deadCalled {
+		t.Fatalf("expected dead to be called")
+	}
+
+	if store.completedCalled {
+		t.Fatalf("did not expect completed to be called")
+	}
+
+	if store.retryCalled {
+		t.Fatalf("did not expect retry to be called")
+	}
+}

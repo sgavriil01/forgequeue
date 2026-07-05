@@ -605,3 +605,90 @@ func TestReclaimExpiredJobsMarksJobDeadWhenRetriesExhausted(t *testing.T) {
 		t.Fatalf("expected %q, got %q", expected, job.ErrorMessage.String)
 	}
 }
+
+func TestStaleWorkerCannotCompleteAfterLeaseReclaimed(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	truncateJobs(t, ctx, pool)
+
+	queries := New(pool)
+
+	_, err = queries.CreateJob(ctx, CreateJobParams{
+		Kind:       "stale_worker_test",
+		Payload:    []byte(`{}`),
+		MaxRetries: 3,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	claimedByOldWorker, err := queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "old-worker",
+		LeaseSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("claim job as old worker: %v", err)
+	}
+
+	_, err = pool.Exec(
+		ctx,
+		"UPDATE jobs SET locked_until = clock_timestamp() - INTERVAL '1 second' WHERE id = $1",
+		claimedByOldWorker.ID,
+	)
+	if err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	reclaimed, err := queries.ReclaimExpiredJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("reclaim expired jobs: %v", err)
+	}
+
+	if len(reclaimed) != 1 {
+		t.Fatalf("expected 1 reclaimed job, got %d", len(reclaimed))
+	}
+
+	_, err = queries.MarkJobCompleted(ctx, MarkJobCompletedParams{
+		ID:       claimedByOldWorker.ID,
+		WorkerID: "old-worker",
+	})
+
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("expected old worker completion to affect no rows, got %v", err)
+	}
+
+	claimedByNewWorker, err := queries.ClaimNextJob(ctx, ClaimNextJobParams{
+		WorkerID:     "new-worker",
+		LeaseSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("claim job as new worker: %v", err)
+	}
+
+	if claimedByNewWorker.ID != claimedByOldWorker.ID {
+		t.Fatalf("expected same job to be reclaimed, got %v", claimedByNewWorker.ID)
+	}
+
+	completed, err := queries.MarkJobCompleted(ctx, MarkJobCompletedParams{
+		ID:       claimedByNewWorker.ID,
+		WorkerID: "new-worker",
+	})
+	if err != nil {
+		t.Fatalf("mark completed as new worker: %v", err)
+	}
+
+	if completed.Status != JobStatusCompleted {
+		t.Fatalf("expected completed, got %s", completed.Status)
+	}
+}
