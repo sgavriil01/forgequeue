@@ -495,6 +495,98 @@ func TestWorkerPoolReclaimsExpiredRunningJobAndCompletesIt(t *testing.T) {
 	}
 }
 
+func TestWorkerPoolHeartbeatPreventsReclaimForLongRunningJob(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("skipping integration test: TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+	pool := openTestDB(t, ctx, dbURL)
+	defer pool.Close()
+
+	truncateJobsForWorkerTest(t, ctx, pool)
+
+	queries := db.New(pool)
+
+	kind := "long_running_heartbeat_job"
+
+	created, err := queries.CreateJob(ctx, db.CreateJobParams{
+		Kind:       kind,
+		Payload:    []byte(`{}`),
+		MaxRetries: 3,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	var handlerCalls int32
+
+	registry, err := NewRegistry(
+		NewHandlerFunc(kind, func(ctx context.Context, job db.Job) error {
+			atomic.AddInt32(&handlerCalls, 1)
+
+			select {
+			case <-time.After(2500 * time.Millisecond):
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	workerPool := NewExecutorPool(
+		queries,
+		registry,
+		PoolConfig{
+			NumWorkers:      1,
+			PollInterval:    5 * time.Millisecond,
+			IdleJitter:      1 * time.Millisecond,
+			LeaseSeconds:    2,
+			ReclaimInterval: 100 * time.Millisecond,
+			ReclaimJobLimit: 10,
+		},
+		discardLogger(),
+	)
+
+	workerPool.Start(ctx)
+	defer workerPool.Stop()
+
+	waitUntilIntegration(t, func() bool {
+		return countJobsByKindAndStatus(t, ctx, pool, kind, db.JobStatusCompleted) == 1
+	}, 6*time.Second)
+
+	workerPool.Stop()
+
+	if got := atomic.LoadInt32(&handlerCalls); got != 1 {
+		t.Fatalf("expected handler to be called once, got %d", got)
+	}
+
+	finalJob, err := queries.GetJobByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get final job: %v", err)
+	}
+
+	if finalJob.Status != db.JobStatusCompleted {
+		t.Fatalf("expected completed, got %s", finalJob.Status)
+	}
+
+	if finalJob.RetryCount != 0 {
+		t.Fatalf("expected retry_count 0 because heartbeat prevented reclaim, got %d", finalJob.RetryCount)
+	}
+
+	if finalJob.LockedBy.Valid {
+		t.Fatalf("expected locked_by to be cleared")
+	}
+
+	if finalJob.LockedUntil.Valid {
+		t.Fatalf("expected locked_until to be cleared")
+	}
+}
+
 func openTestDB(t *testing.T, ctx context.Context, dbURL string) *pgxpool.Pool {
 	t.Helper()
 

@@ -122,6 +122,17 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 		WorkerID: e.workerID,
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			e.logger.Warn(
+				"job lease lost before completion",
+				"job_id", job.ID,
+				"kind", job.Kind,
+				"worker_id", e.workerID,
+			)
+
+			return true, nil
+		}
+
 		return true, fmt.Errorf("mark job completed: %w", err)
 	}
 
@@ -217,6 +228,17 @@ func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string
 			ErrorMessage: message,
 		})
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				e.logger.Warn(
+					"job lease lost before marking dead",
+					"job_id", job.ID,
+					"kind", job.Kind,
+					"worker_id", e.workerID,
+				)
+
+				return nil
+			}
+
 			return fmt.Errorf("mark job dead: %w", err)
 		}
 
@@ -242,6 +264,17 @@ func (e *Executor) handleFailure(ctx context.Context, job db.Job, message string
 		DelaySeconds: delaySeconds,
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			e.logger.Warn(
+				"job lease lost before scheduling retry",
+				"job_id", job.ID,
+				"kind", job.Kind,
+				"worker_id", e.workerID,
+			)
+
+			return nil
+		}
+
 		return fmt.Errorf("schedule job retry: %w", err)
 	}
 
