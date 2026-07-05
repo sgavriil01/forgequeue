@@ -11,6 +11,7 @@ import (
 
 	db "github.com/sgavriil01/forgequeue/internal/db/sqlc"
 	"github.com/sgavriil01/forgequeue/internal/jobs"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type JobService interface {
@@ -49,6 +50,8 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/jobs/{id}", s.handleGetJob)
 	r.Get("/jobs", s.handleListJobs)
 	r.Post("/jobs/{id}/cancel", s.handleCancelJob)
+
+	r.Handle("/metrics", promhttp.Handler())
 
 	return r
 }
