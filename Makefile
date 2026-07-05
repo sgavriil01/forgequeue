@@ -39,3 +39,19 @@ sqlc:
 	
 run-api-local:
 	FORGEQUEUE_DATABASE_URL="postgres://forgequeue:forgequeue@localhost:5433/forgequeue?sslmode=disable" go run ./cmd/api
+
+LOAD_RATE ?= 20
+LOAD_DURATION ?= 30s
+LOAD_VUS ?= 20
+LOAD_MAX_VUS ?= 100
+API_URL ?= http://localhost:8080
+
+.PHONY: load-test
+load-test:
+	docker run --rm -i --network host \
+		-e API_URL="$(API_URL)" \
+		-e RATE="$(LOAD_RATE)" \
+		-e DURATION="$(LOAD_DURATION)" \
+		-e VUS="$(LOAD_VUS)" \
+		-e MAX_VUS="$(LOAD_MAX_VUS)" \
+		grafana/k6 run - < loadtest/create_jobs.js
