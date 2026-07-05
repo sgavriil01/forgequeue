@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -15,6 +16,7 @@ import (
 const (
 	defaultErrorMessageLimit = 1000
 	maxRetryDelaySeconds    = int32(60)
+	minHeartbeatInterval    = 100 * time.Millisecond
 )
 
 type Store interface {
@@ -22,27 +24,52 @@ type Store interface {
 	MarkJobCompleted(ctx context.Context, arg db.MarkJobCompletedParams) (db.Job, error)
 	ScheduleJobRetry(ctx context.Context, arg db.ScheduleJobRetryParams) (db.Job, error)
 	MarkJobDead(ctx context.Context, arg db.MarkJobDeadParams) (db.Job, error)
+	RenewJobLease(ctx context.Context, arg db.RenewJobLeaseParams) (db.Job, error)
 }
 
 type Executor struct {
-	store        Store
-	registry     *Registry
-	workerID     string
-	leaseSeconds int32
-	logger       *slog.Logger
+	store             Store
+	registry          *Registry
+	workerID          string
+	leaseSeconds      int32
+	heartbeatInterval time.Duration
+	logger            *slog.Logger
 }
 
 func NewExecutor(store Store, registry *Registry, workerID string, leaseSeconds int32, logger *slog.Logger) *Executor {
+	return NewExecutorWithHeartbeat(
+		store,
+		registry,
+		workerID,
+		leaseSeconds,
+		defaultHeartbeatInterval(leaseSeconds),
+		logger,
+	)
+}
+
+func NewExecutorWithHeartbeat(
+	store Store,
+	registry *Registry,
+	workerID string,
+	leaseSeconds int32,
+	heartbeatInterval time.Duration,
+	logger *slog.Logger,
+) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = defaultHeartbeatInterval(leaseSeconds)
+	}
+
 	return &Executor{
-		store:        store,
-		registry:     registry,
-		workerID:     workerID,
-		leaseSeconds: leaseSeconds,
-		logger:       logger,
+		store:             store,
+		registry:          registry,
+		workerID:          workerID,
+		leaseSeconds:      leaseSeconds,
+		heartbeatInterval: heartbeatInterval,
+		logger:            logger,
 	}
 }
 
@@ -76,8 +103,14 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
-	if err := e.runHandler(ctx, handler, job); err != nil {
-		if markErr := e.handleFailure(ctx, job, err.Error()); markErr != nil {
+	handlerCtx, stopHeartbeat := e.startHeartbeat(ctx, job)
+
+	handlerErr := e.runHandler(handlerCtx, handler, job)
+
+	stopHeartbeat()
+
+	if handlerErr != nil {
+		if markErr := e.handleFailure(ctx, job, handlerErr.Error()); markErr != nil {
 			return true, markErr
 		}
 
@@ -100,6 +133,58 @@ func (e *Executor) ExecuteOnce(ctx context.Context) (bool, error) {
 	)
 
 	return true, nil
+}
+
+func (e *Executor) startHeartbeat(ctx context.Context, job db.Job) (context.Context, func()) {
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		ticker := time.NewTicker(e.heartbeatInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				_, err := e.store.RenewJobLease(heartbeatCtx, db.RenewJobLeaseParams{
+					ID:           job.ID,
+					WorkerID:     e.workerID,
+					LeaseSeconds: e.leaseSeconds,
+				})
+				if err != nil {
+					e.logger.Error(
+						"job lease renewal failed",
+						"job_id", job.ID,
+						"kind", job.Kind,
+						"worker_id", e.workerID,
+						"error", err,
+					)
+
+					cancel()
+					return
+				}
+
+				e.logger.Debug(
+					"job lease renewed",
+					"job_id", job.ID,
+					"kind", job.Kind,
+					"worker_id", e.workerID,
+				)
+
+			case <-heartbeatCtx.Done():
+				return
+			}
+		}
+	}()
+
+	stop := func() {
+		cancel()
+		<-done
+	}
+
+	return heartbeatCtx, stop
 }
 
 func (e *Executor) runHandler(ctx context.Context, handler JobHandler, job db.Job) (err error) {
@@ -186,6 +271,19 @@ func retryDelaySeconds(currentRetryCount int32) int32 {
 	}
 
 	return delay
+}
+
+func defaultHeartbeatInterval(leaseSeconds int32) time.Duration {
+	if leaseSeconds <= 0 {
+		return time.Second
+	}
+
+	interval := time.Duration(leaseSeconds) * time.Second / 3
+	if interval < minHeartbeatInterval {
+		return minHeartbeatInterval
+	}
+
+	return interval
 }
 
 func truncate(value string, limit int) string {
