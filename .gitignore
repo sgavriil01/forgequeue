@@ -1,20 +1,20 @@
-# Go
-bin/
-*.test
-*.out
-coverage.out
-coverage.html
-
 # Environment
 .env
 .env.*
 !.env.example
 
-# OS / editors
-.DS_Store
-.idea/
-.vscode/
-*.swp
+# Go build/test outputs
+bin/
+dist/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Load-test generated outputs
+load-results/
+k6-results/
+*.prof
 
 # Docker / local data
 postgres-data/
@@ -24,3 +24,9 @@ postgres-data/
 
 # Temporary files
 tmp/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -5,11 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
-	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -40,8 +41,24 @@ func run(ctx context.Context, getenv func(string) string) error {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	workerCount, err := workerCountFromEnv(getenv)
+	if err != nil {
+		return err
+	}
+
+	metricsAddr := getenv("FORGEQUEUE_WORKER_METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9090"
+	}
+
+	logger.Info(
+		"worker config loaded",
+		"worker_count", workerCount,
+		"metrics_addr", metricsAddr,
+	)
+
 	metricsServer := &http.Server{
-		Addr:    ":9090",
+		Addr:    metricsAddr,
 		Handler: promhttp.Handler(),
 	}
 
@@ -78,11 +95,25 @@ func run(ctx context.Context, getenv func(string) string) error {
 				"payload", string(job.Payload),
 			)
 
-			// Simulate a tiny bit of work so you can observe the worker.
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(250 * time.Millisecond):
+				return nil
+			}
+		}),
+
+		worker.NewHandlerFunc("slow_test_job", func(ctx context.Context, job db.Job) error {
+			logger.Info(
+				"handling slow test job",
+				"job_id", job.ID,
+				"payload", string(job.Payload),
+			)
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(60 * time.Second):
 				return nil
 			}
 		}),
@@ -95,7 +126,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 		queries,
 		registry,
 		worker.PoolConfig{
-			NumWorkers:   5,
+			NumWorkers:   workerCount,
 			PollInterval: 1 * time.Second,
 			IdleJitter:   250 * time.Millisecond,
 			LeaseSeconds: 30,
@@ -120,4 +151,22 @@ func run(ctx context.Context, getenv func(string) string) error {
 	}
 
 	return nil
+}
+
+func workerCountFromEnv(getenv func(string) string) (int, error) {
+	value := getenv("FORGEQUEUE_WORKER_COUNT")
+	if value == "" {
+		return 5, nil
+	}
+
+	count, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("FORGEQUEUE_WORKER_COUNT must be an integer: %w", err)
+	}
+
+	if count <= 0 {
+		return 0, fmt.Errorf("FORGEQUEUE_WORKER_COUNT must be greater than zero")
+	}
+
+	return count, nil
 }
