@@ -195,13 +195,53 @@ jobs with retry/reclaim count = 1
 
 This confirms that ForgeQueue can recover from a worker process crash without losing jobs or leaving jobs stuck forever.
 
+## Database Claim Query
+
+The worker claim query was tested with `EXPLAIN ANALYZE` using 10,000 pending jobs. This query is important because workers run it repeatedly to claim the next available job.
+
+Before adding the dedicated claim index, PostgreSQL scanned and sorted the pending jobs:
+
+```text
+Seq Scan on jobs
+Sort
+Execution Time: 2.509 ms
+```
+
+A partial index was added for the worker claim path:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_jobs_pending_priority_run_at
+ON jobs (priority DESC, run_at ASC)
+WHERE status = 'pending';
+```
+
+After adding the index, PostgreSQL used the index directly:
+
+```text
+Index Scan using idx_jobs_pending_priority_run_at
+Execution Time: 0.168 ms
+```
+
+This improves the core worker operation because claiming the next pending job no longer requires scanning and sorting the full pending queue.
+
+## Race Testing
+
+The full Go test suite was run with the race detector:
+
+```bash
+go test -race -count=1 ./...
+```
+
+The test suite passed without detecting data races.
+
 ## Takeaways
 
-- ForgeQueue handled 1000 jobs with 1, 5, and 10 workers without errors or stuck jobs.
+- ForgeQueue handled 1,000 jobs with 1, 5, and 10 workers without errors or stuck jobs.
 - ForgeQueue handled a 10,000-job backlog with 5 workers and drained it successfully.
 - ForgeQueue recovered from a killed worker process and reclaimed the in-progress job.
 - API latency remained low even while workers were processing a large backlog.
 - Worker count directly affects throughput and queue latency.
 - `forgequeue_queue_depth` is the clearest signal for whether workers are keeping up.
 - `forgequeue_queue_latency_seconds` shows the user-visible impact of worker saturation.
+- The claim-query index changed the worker claim path from a sequential scan and sort to an index scan.
 - Higher worker counts may eventually hit PostgreSQL connection pool or row-locking limits.
