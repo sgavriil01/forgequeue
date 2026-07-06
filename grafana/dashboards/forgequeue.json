@@ -1,0 +1,187 @@
+{
+  "uid": "forgequeue",
+  "title": "ForgeQueue",
+  "tags": [
+    "forgequeue"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Pending Jobs",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "forgequeue_queue_depth{job=\"forgequeue-api\",status=\"pending\"}",
+          "legendFormat": "pending"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Running Jobs",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "forgequeue_queue_depth{job=\"forgequeue-api\",status=\"running\"}",
+          "legendFormat": "running"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Dead Jobs",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "forgequeue_queue_depth{job=\"forgequeue-api\",status=\"dead\"}",
+          "legendFormat": "dead"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Active Workers",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "forgequeue_active_workers{job=\"forgequeue-worker\"}",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue Depth",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "forgequeue_queue_depth{job=\"forgequeue-api\"}",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Active Workers",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "forgequeue_active_workers{job=\"forgequeue-worker\"}",
+          "legendFormat": "active workers"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Jobs by Status Rate",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(forgequeue_jobs_total{job=\"forgequeue-worker\"}[1m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retries Rate",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(forgequeue_retry_total{job=\"forgequeue-worker\"}[1m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue Latency p95",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(forgequeue_queue_latency_seconds_bucket{job=\"forgequeue-worker\"}[5m])))",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Job Duration p95",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(forgequeue_job_duration_seconds_bucket{job=\"forgequeue-worker\"}[5m])))",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    }
+  ]
+}
