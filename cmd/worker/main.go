@@ -95,11 +95,25 @@ func run(ctx context.Context, getenv func(string) string) error {
 				"payload", string(job.Payload),
 			)
 
-			// Simulate a tiny bit of work so you can observe the worker.
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(250 * time.Millisecond):
+				return nil
+			}
+		}),
+
+		worker.NewHandlerFunc("slow_test_job", func(ctx context.Context, job db.Job) error {
+			logger.Info(
+				"handling slow test job",
+				"job_id", job.ID,
+				"payload", string(job.Payload),
+			)
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(60 * time.Second):
 				return nil
 			}
 		}),

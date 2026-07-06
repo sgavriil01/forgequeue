@@ -11,14 +11,17 @@ These results were collected on a local development machine, not a controlled pr
 | OS | Fedora Linux 42 Workstation |
 | Kernel | Linux 6.19.14-108.fc42.x86_64 |
 | Machine | ASUS Zenbook UX3402ZA |
-| CPU | Intel Core i5-1240P, 12th Gen, 16 logical CPUs |
+| CPU | Intel Core i5-1240P, 12th Gen |
+| CPU cores | 12 total cores: 4 performance cores + 8 efficiency cores |
+| Logical CPUs / threads | 16 |
 | Memory | 15.23 GiB RAM |
 | Database | PostgreSQL 16 via Docker Compose |
 | API | `go run ./cmd/api` |
-| Worker | compiled local worker binary via `scripts/run_load_scenarios.sh` / `scripts/run_backlog_scenario.sh` |
+| Worker | compiled local worker binary via test scripts |
 | Load tool | k6 via Docker |
 | Job kind | `test_job` |
-| Simulated work per job | ~250ms |
+| Simulated work per normal job | ~250ms |
+| Simulated work per slow job | ~60s |
 
 ## Load Test Commands
 
@@ -46,13 +49,15 @@ Run backlog scenario:
 ./scripts/run_backlog_scenario.sh
 ```
 
-## Worker-Count Load Test Scenarios
-
-The worker-count scenarios were run using:
+Run crash/reclaim scenario:
 
 ```bash
-./scripts/run_load_scenarios.sh
+./scripts/run_crash_reclaim_scenario.sh
 ```
+
+## Worker-Count Load Test Scenarios
+
+These scenarios test how throughput changes as worker count increases.
 
 Each scenario:
 
@@ -73,9 +78,9 @@ Each scenario:
 
 ### Interpretation
 
-The API accepted all submitted jobs successfully in every scenario, with `0.00%` HTTP failures. API p95 latency stayed below `10ms`, which shows that job submission was not the bottleneck in these tests.
+The API accepted all submitted jobs successfully in every scenario, with `0.00%` HTTP failures. API p95 latency stayed below `10ms`, so job submission was not the bottleneck.
 
-Worker throughput increased significantly as the worker count increased:
+Worker throughput improved as worker count increased:
 
 ```text
 1 worker   -> 3.80 jobs/s
@@ -83,7 +88,7 @@ Worker throughput increased significantly as the worker count increased:
 10 workers -> 35.71 jobs/s
 ```
 
-This is close to linear scaling for this local workload, but not perfectly linear. That is expected because workers coordinate through PostgreSQL using `FOR UPDATE SKIP LOCKED`, and there is overhead from polling, database queries, scheduling, and connection usage.
+This is close to linear scaling for this local workload, but not perfect. The gap is expected because workers still coordinate through PostgreSQL using `FOR UPDATE SKIP LOCKED`, and there is overhead from polling, database queries, scheduling, and connection usage.
 
 Average queue latency decreased as more workers were added:
 
@@ -92,8 +97,6 @@ Average queue latency decreased as more workers were added:
 5 workers, 1000 jobs  -> 26.516s
 10 workers, 1000 jobs -> 13.628s
 ```
-
-This confirms that queue latency is strongly affected by worker capacity. When there are not enough workers, jobs wait longer before being claimed. When more workers are available, the queue drains faster and jobs spend less time waiting.
 
 All worker-count scenarios ended with:
 
@@ -104,11 +107,11 @@ pending = 0
 running = 0
 ```
 
-So no jobs were lost, stuck, or incorrectly moved to the dead-letter state during these load tests.
+No jobs were lost, stuck, or incorrectly moved to the dead-letter state.
 
 ## Backlog Scenario: 10,000 Jobs
 
-This scenario submits 10,000 jobs faster than the worker pool can process them. It tests whether ForgeQueue can build up a large queue, continue processing steadily, and eventually drain the backlog without losing jobs.
+This scenario submits 10,000 jobs faster than the worker pool can process them. It tests whether ForgeQueue can build up a large queue, process steadily, and eventually drain the backlog without losing jobs.
 
 ### Configuration
 
@@ -124,8 +127,6 @@ This scenario submits 10,000 jobs faster than the worker pool can process them. 
 
 ### Queue-Depth Samples
 
-The queue-depth samples showed the expected behavior:
-
 ```text
 start: pending=9976 running=5 completed=19 dead=0
 end:   pending=0    running=0 completed=10000 dead=0
@@ -135,23 +136,21 @@ end:   pending=0    running=0 completed=10000 dead=0
 
 The API accepted 10,000 jobs with `0.00%` HTTP failures and low p95 latency. Because the jobs were submitted much faster than the workers could process them, queue depth grew close to 10,000 pending jobs.
 
-The worker pool then processed the backlog steadily. With 5 workers and ~250ms of simulated work per job, the theoretical maximum is roughly:
+The worker pool then drained the backlog steadily. With 5 workers and ~250ms of simulated work per job, the rough theoretical maximum is:
 
 ```text
 5 workers × 4 jobs/sec = 20 jobs/sec
 ```
 
-The measured throughput was:
+Measured throughput was:
 
 ```text
 18.76 jobs/sec
 ```
 
-This is close to the expected limit.
+The average queue latency was `266.995s`, which is expected for a large backlog. Since total drain time was `533s`, the average job waited roughly half the drain time before being claimed.
 
-The average queue latency was `266.995s`, which is also expected for a large FIFO-style backlog. Since the total drain time was `533s`, the average job waited roughly half the total drain time before being claimed.
-
-The backlog fully drained:
+Final state:
 
 ```text
 completed = 10,000
@@ -160,14 +159,49 @@ pending = 0
 running = 0
 ```
 
-No jobs were lost, stuck, or incorrectly moved to the dead-letter state. This confirms that ForgeQueue can handle a large backlog and eventually drain it with a fixed-size worker pool.
+No jobs were lost, stuck, or incorrectly moved to the dead-letter state.
+
+## Crash/Reclaim Scenario
+
+This scenario verifies that ForgeQueue can recover from a worker process crash while a job is running.
+
+Because the normal worker pool uses goroutines inside one process, this test starts 5 separate worker processes with `FORGEQUEUE_WORKER_COUNT=1`. One process is then killed with `kill -9` while processing a slow job.
+
+### Configuration
+
+| Worker Processes | Workers per Process | Jobs | Job Kind | Simulated Work |
+|---:|---:|---:|---|---:|
+| 5 | 1 | 5 | `slow_test_job` | ~60s/job |
+
+### Results
+
+| Killed Workers | Time After Kill Until Completion | Completed | Dead | Pending | Running | Jobs With Retry/Reclaim Count |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 123s | 5 | 0 | 0 | 0 | 1 |
+
+### Interpretation
+
+The killed worker left one job in `running` state with an active lease. The job stayed in `running` until the lease expired. After lease expiry, the reclaimer moved the job back to the queue, and a surviving worker picked it up and completed it.
+
+Final state:
+
+```text
+completed = 5
+dead = 0
+pending = 0
+running = 0
+jobs with retry/reclaim count = 1
+```
+
+This confirms that ForgeQueue can recover from a worker process crash without losing jobs or leaving jobs stuck forever.
 
 ## Takeaways
 
 - ForgeQueue handled 1000 jobs with 1, 5, and 10 workers without errors or stuck jobs.
 - ForgeQueue handled a 10,000-job backlog with 5 workers and drained it successfully.
+- ForgeQueue recovered from a killed worker process and reclaimed the in-progress job.
 - API latency remained low even while workers were processing a large backlog.
 - Worker count directly affects throughput and queue latency.
 - `forgequeue_queue_depth` is the clearest signal for whether workers are keeping up.
 - `forgequeue_queue_latency_seconds` shows the user-visible impact of worker saturation.
-- The system currently scales well for this local test workload, but higher worker counts may eventually hit PostgreSQL connection pool or row-locking limits.
+- Higher worker counts may eventually hit PostgreSQL connection pool or row-locking limits.
