@@ -2,18 +2,19 @@
 
 A durable PostgreSQL-backed job queue built in Go.
 
-ForgeQueue exposes an HTTP API for creating jobs, stores them in PostgreSQL, and runs them through a worker pool with retries, leases, crash recovery, and Prometheus metrics.
+ForgeQueue lets an API accept jobs, stores them safely in PostgreSQL, and lets worker processes claim and execute them. It includes retries, dead-letter jobs, lease-based crash recovery, Prometheus metrics, a Grafana dashboard, and k6 load tests.
 
-## Features
+## Why this project exists
 
-- Durable job storage in PostgreSQL
-- HTTP API for creating, listing, reading, and cancelling jobs
-- Concurrent workers using `FOR UPDATE SKIP LOCKED`
-- Retries and dead-letter jobs
-- Lease/heartbeat system for crash recovery
-- Prometheus metrics
-- k6 load-test scripts
-- Demo script for a full local run
+This project demonstrates backend infrastructure concepts in a small, readable system:
+
+- durable job storage
+- safe concurrent workers
+- PostgreSQL row locking with `FOR UPDATE SKIP LOCKED`
+- retries and dead-letter handling
+- worker crash recovery with leases and heartbeats
+- observability with Prometheus and Grafana
+- load testing and performance documentation
 
 ## Architecture
 
@@ -21,20 +22,34 @@ ForgeQueue exposes an HTTP API for creating jobs, stores them in PostgreSQL, and
 Client -> HTTP API -> PostgreSQL <- Worker Pool
 ```
 
-The API writes jobs to PostgreSQL. Workers claim pending jobs, execute registered handlers, and update job status.
+The API creates and reads jobs. PostgreSQL stores the queue state. Workers claim pending jobs, execute handlers, and update the job status.
 
-More detail:
+Read more:
 
-- `docs/architecture.md`
-- `docs/design_decisions.md`
-- `docs/performance.md`
+- [Architecture](docs/architecture.md)
+- [Design decisions](docs/design_decisions.md)
+- [Performance notes](docs/performance.md)
+
+## Features
+
+- HTTP API for creating, listing, reading, and cancelling jobs
+- PostgreSQL-backed durable queue
+- Worker pool with configurable worker count
+- Concurrent claiming with `FOR UPDATE SKIP LOCKED`
+- Retry and dead-letter flow
+- Lease and heartbeat system
+- Expired lease reclaiming after worker crashes
+- Prometheus metrics
+- Grafana dashboard
+- k6 load-test scripts
+- Local demo script
 
 ## Quick Start
 
 Start PostgreSQL:
 
 ```bash
-docker compose up -d
+docker compose up -d postgres
 ```
 
 Run migrations:
@@ -60,7 +75,7 @@ FORGEQUEUE_WORKER_METRICS_ADDR=":9090" \
 make run-worker
 ```
 
-Create a job:
+Submit a job:
 
 ```bash
 curl -X POST localhost:8080/jobs \
@@ -68,11 +83,10 @@ curl -X POST localhost:8080/jobs \
   -d '{"kind":"test_job","payload":{"message":"hello"},"max_retries":3}'
 ```
 
-Check metrics:
+Check queue depth:
 
 ```bash
 curl -s localhost:8080/metrics | grep forgequeue_queue_depth
-curl -s localhost:9090/metrics | grep forgequeue_active_workers
 ```
 
 ## Demo
@@ -84,7 +98,34 @@ chmod +x scripts/demo.sh
 ./scripts/demo.sh
 ```
 
-The demo starts the system, submits jobs, waits for completion, and prints queue depth.
+The demo starts the system, submits jobs, waits for them to finish, and prints the final queue state.
+
+## Monitoring
+
+Start Prometheus and Grafana:
+
+```bash
+docker compose up -d prometheus grafana
+```
+
+Open:
+
+- Prometheus: <http://localhost:9091>
+- Grafana: <http://localhost:3000>
+
+Grafana login:
+
+```text
+admin / admin
+```
+
+The ForgeQueue dashboard is provisioned from:
+
+- [Grafana dashboard JSON](grafana/dashboards/forgequeue.json)
+
+Prometheus config:
+
+- [Prometheus config](prometheus/prometheus.yml)
 
 ## API
 
@@ -98,7 +139,7 @@ The demo starts the system, submits jobs, waits for completion, and prints queue
 | `GET` | `/readyz` | Readiness check |
 | `GET` | `/metrics` | Prometheus metrics |
 
-Create job request:
+Example job:
 
 ```json
 {
@@ -106,19 +147,9 @@ Create job request:
   "payload": {
     "message": "hello"
   },
-  "run_at": "2026-01-01T12:00:00Z",
   "max_retries": 3
 }
 ```
-
-Validation rules:
-
-| Field | Rule |
-|---|---|
-| `kind` | required, non-empty, max 100 chars |
-| `payload` | optional JSON object, max 64KB |
-| `run_at` | optional RFC3339 timestamp |
-| `max_retries` | optional integer, 0-10, defaults to 3 |
 
 ## Job Lifecycle
 
@@ -129,16 +160,23 @@ running -> pending
 running -> dead
 ```
 
-A failed job is retried if retries remain. Otherwise, it moves to `dead`.
+A failed job is retried while retries remain. After retries are exhausted, it moves to `dead`.
 
-## Configuration
+## Performance
 
-| Variable | Default | Description |
-|---|---|---|
-| `FORGEQUEUE_DATABASE_URL` | required | PostgreSQL connection string |
-| `FORGEQUEUE_HTTP_ADDR` | `:8080` | API listen address |
-| `FORGEQUEUE_WORKER_COUNT` | `5` | Number of workers |
-| `FORGEQUEUE_WORKER_METRICS_ADDR` | `:9090` | Worker metrics address |
+Local load-test results:
+
+| Scenario | Result |
+|---|---:|
+| 1 worker, 1000 jobs | 3.80 jobs/s |
+| 5 workers, 1000 jobs | 18.52 jobs/s |
+| 10 workers, 1000 jobs | 35.71 jobs/s |
+| 5 workers, 10,000 jobs | 18.76 jobs/s |
+| Crash/reclaim test | 5 completed, 0 dead |
+
+Full results are in [docs/performance.md](docs/performance.md).
+
+The worker claim query was also checked with `EXPLAIN ANALYZE`. Adding a partial index changed the claim path from a sequential scan and sort to an index scan.
 
 ## Development
 
@@ -168,46 +206,34 @@ Run load tests:
 ./scripts/run_crash_reclaim_scenario.sh
 ```
 
-## Performance Summary
+## Project Docs
 
-Local results:
-
-| Scenario | Result |
-|---|---:|
-| 1 worker, 1000 jobs | 3.80 jobs/s |
-| 5 workers, 1000 jobs | 18.52 jobs/s |
-| 10 workers, 1000 jobs | 35.71 jobs/s |
-| 5 workers, 10,000 jobs | 18.76 jobs/s |
-| crash/reclaim test | 5 completed, 0 dead |
-
-The worker claim query was improved with a partial index:
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_jobs_pending_priority_run_at
-ON jobs (priority DESC, run_at ASC)
-WHERE status = 'pending';
-```
-
-This changed the local claim path from a sequential scan and sort to an index scan.
+- [Architecture](docs/architecture.md)
+- [Design decisions](docs/design_decisions.md)
+- [Performance notes](docs/performance.md)
+- [Grafana dashboard](grafana/dashboards/forgequeue.json)
+- [Prometheus config](prometheus/prometheus.yml)
 
 ## Limitations
 
 - At-least-once delivery, not exactly-once
-- Handlers must be idempotent
+- Job handlers should be idempotent
 - No multi-tenancy yet
-- No dashboard
-- No job retention/archival policy yet
+- No job retention or archival policy yet
+- No web dashboard for job management
 - Not intended for Kafka-level event streaming throughput
 
 ## Future Work
 
-- Grafana dashboard
-- POST /jobs/{id}/retry endpoint
-- LISTEN/NOTIFY to wake idle workers
-- tenant_id / multi-tenancy
+- `POST /jobs/{id}/retry`
+- LISTEN/NOTIFY to reduce polling latency
+- Configurable retry backoff
+- Job retention / archival
 - pprof profiling
+- OpenTelemetry tracing
 - testcontainers-go integration tests
+- goleak checks
 
 ## License
 
-See `LICENSE`.
+This project is licensed under the terms in [LICENSE](LICENSE).
