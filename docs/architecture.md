@@ -199,15 +199,6 @@ This changed the local claim path from a sequential scan and sort to an index sc
 - No job retention/archival policy yet
 - Not intended for Kafka-level event streaming throughput
 
-## Future Work
-
-- Grafana dashboard
-- POST /jobs/{id}/retry endpoint
-- LISTEN/NOTIFY to wake idle workers
-- tenant_id / multi-tenancy
-- pprof profiling
-- testcontainers-go integration tests
-
 ## License
 
 See `LICENSE`.
